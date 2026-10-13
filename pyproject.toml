@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coop-sql-source-control"
+version = "0.1.0"
+description = "Source control for SQL Server, Azure SQL and Fabric: one file per object, git, checkout and check-in."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "Cooptimize" }]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+    "pyodbc>=5.1",
+    "azure-identity>=1.17",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+coop-sqlsc = "coop_sqlsc.cli:main"
+sqlsc = "coop_sqlsc.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coop_sqlsc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a live SQL Server (set SQLSC_TEST_SERVER)"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
