@@ -71,6 +71,7 @@ def test_static_data_tracks_commits_and_rebuilds(tmp_path, server, make_db):
     config = link(tmp_path, server, db)
     git(tmp_path, "init", "-q")
     git(tmp_path, "config", "user.email", "dev@example.com")
+    git(tmp_path, "config", "user.name", "Dev")
     sqlsc(config, "commit", "-m", "Schema")
 
     added = sqlsc(config, "data", "add", "sales.Status", "Reason")
@@ -137,6 +138,7 @@ def test_deploy_releases_a_commit_and_records_it(tmp_path, server, make_db):
     config = link(tmp_path, server, dev)
     git(tmp_path, "init", "-q")
     git(tmp_path, "config", "user.email", "dev@example.com")
+    git(tmp_path, "config", "user.name", "Dev")
     sqlsc(config, "commit", "-m", "v1")
     git(tmp_path, "tag", "v1")
     view = tmp_path / "database" / "Views" / "sales.vCustomerTotals.sql"
