@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Id="CoopSqlSourceControl.772e6ac3-d552-4127-ba5f-3c25fd661535" Version="0.5.0" Language="en-US" Publisher="Cooptimize" />
+    <DisplayName>Coop SQL Source Control</DisplayName>
+    <Description xml:space="preserve">Source control for SQL Server, Azure SQL and Microsoft Fabric databases in SSMS: status, diff, commit, get latest, checkout and check-in, through the sqlsc command line.</Description>
+  </Metadata>
+  <Installation>
+    <!-- SSMS 21 and 22 run on the Visual Studio 2022 (17.x) shell. The target
+         below also lets the extension be tried in Visual Studio's experimental
+         instance; SSMS itself takes it by copying, see ssms/README.md. -->
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,18.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName="Microsoft .NET Framework" d:Source="Manual" Version="[4.8,)" />
+  </Dependencies>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,18.0)" DisplayName="Visual Studio core editor" />
+  </Prerequisites>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+  </Assets>
+</PackageManifest>

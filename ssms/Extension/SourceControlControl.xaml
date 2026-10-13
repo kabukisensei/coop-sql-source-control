@@ -1,0 +1,115 @@
+<UserControl x:Class="CoopSqlSourceControl.SourceControlControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vsshell="clr-namespace:Microsoft.VisualStudio.Shell;assembly=Microsoft.VisualStudio.Shell.15.0"
+             Background="{DynamicResource {x:Static vsshell:VsBrushes.WindowKey}}"
+             Foreground="{DynamicResource {x:Static vsshell:VsBrushes.WindowTextKey}}"
+             MinWidth="320">
+  <UserControl.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Margin" Value="0,0,6,0" />
+      <Setter Property="Padding" Value="8,2" />
+      <Setter Property="MinWidth" Value="70" />
+    </Style>
+    <Style TargetType="DataGrid">
+      <Setter Property="AutoGenerateColumns" Value="False" />
+      <Setter Property="IsReadOnly" Value="True" />
+      <Setter Property="SelectionMode" Value="Extended" />
+      <Setter Property="HeadersVisibility" Value="Column" />
+      <Setter Property="GridLinesVisibility" Value="None" />
+      <Setter Property="Background" Value="{DynamicResource {x:Static vsshell:VsBrushes.WindowKey}}" />
+      <Setter Property="RowBackground" Value="{DynamicResource {x:Static vsshell:VsBrushes.WindowKey}}" />
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static vsshell:VsBrushes.WindowTextKey}}" />
+    </Style>
+  </UserControl.Resources>
+
+  <Grid Margin="8">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="Auto" />
+      <ColumnDefinition Width="*" />
+      <ColumnDefinition Width="Auto" />
+    </Grid.ColumnDefinitions>
+
+    <TextBlock Grid.Row="0" Grid.Column="0" Text="Repo" VerticalAlignment="Center" Margin="0,0,8,6" />
+    <ComboBox x:Name="RepoBox" Grid.Row="0" Grid.Column="1" Margin="0,0,6,6" SelectionChanged="OnRepoChanged"
+              ToolTip="The sqlsc.yml of the repo this database is kept in" />
+    <StackPanel Grid.Row="0" Grid.Column="2" Orientation="Horizontal" Margin="0,0,0,6">
+      <Button Content="Open…" Click="OnOpenRepo" ToolTip="Pick a repo's sqlsc.yml" />
+      <Button x:Name="LocateButton" Content="Find sqlsc…" Click="OnLocateSqlsc" Visibility="Collapsed"
+              ToolTip="sqlsc is not on PATH; point to sqlsc.exe" Margin="0" />
+    </StackPanel>
+
+    <TextBlock Grid.Row="1" Grid.Column="0" Text="Database" VerticalAlignment="Center" Margin="0,0,8,6" />
+    <ComboBox x:Name="TargetBox" Grid.Row="1" Grid.Column="1" Margin="0,0,6,6" DisplayMemberPath="Display"
+              SelectionChanged="OnTargetChanged" ToolTip="A target from sqlsc.yml" />
+    <Button x:Name="RefreshButton" Grid.Row="1" Grid.Column="2" Content="Refresh" Click="OnRefresh" Margin="0,0,0,6"
+            HorizontalAlignment="Left" />
+
+    <TabControl x:Name="Tabs" Grid.Row="2" Grid.ColumnSpan="3" Margin="0,4,0,0">
+      <TabItem Header="Changes">
+        <DockPanel Margin="4">
+          <StackPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+            <TextBlock Text="Commit message" Margin="0,0,0,2" />
+            <TextBox x:Name="CommitMessageBox" Height="48" TextWrapping="Wrap" AcceptsReturn="True"
+                     VerticalScrollBarVisibility="Auto" />
+            <WrapPanel Margin="0,6,0,0">
+              <Button x:Name="CommitButton" Content="Commit" Click="OnCommit"
+                      ToolTip="Script the selected changes (all of them when none are selected) into the repo and commit them" />
+              <Button x:Name="GetLatestButton" Content="Get latest…" Click="OnGetLatest"
+                      ToolTip="Show, then run, the script that makes the database match the repo" />
+              <Button x:Name="DiffButton" Content="Diff" Click="OnDiff" ToolTip="Show the text differences" />
+              <Button x:Name="CheckoutButton" Content="Check out" Click="OnCheckout"
+                      ToolTip="Tell the team you are editing the selected objects" />
+              <Button x:Name="CheckinButton" Content="Check in" Click="OnCheckinChanges"
+                      ToolTip="Commit the selected objects you have checked out, and release them" />
+            </WrapPanel>
+          </StackPanel>
+          <DataGrid x:Name="ChangesGrid" MouseDoubleClick="OnDiff">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Change" Binding="{Binding ActionText}" Width="Auto" />
+              <DataGridTextColumn Header="Type" Binding="{Binding TypeText}" Width="Auto" />
+              <DataGridTextColumn Header="Object" Binding="{Binding Object}" Width="*" />
+              <DataGridTextColumn Header="Checked out by" Binding="{Binding LockedBy}" Width="Auto" />
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+      </TabItem>
+      <TabItem Header="Checkouts">
+        <DockPanel Margin="4">
+          <WrapPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+            <Button x:Name="LockCheckinButton" Content="Check in" Click="OnCheckinLocks"
+                    ToolTip="Commit the selected objects and release them" />
+            <Button x:Name="UndoCheckoutButton" Content="Undo checkout" Click="OnUndoCheckout"
+                    ToolTip="Release the selected checkouts without committing" />
+            <Button x:Name="ForceReleaseButton" Content="Release…" Click="OnForceRelease"
+                    ToolTip="Release someone else's checkout" />
+          </WrapPanel>
+          <DataGrid x:Name="LocksGrid">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Object" Binding="{Binding Object}" Width="*" />
+              <DataGridTextColumn Header="Type" Binding="{Binding TypeText}" Width="Auto" />
+              <DataGridTextColumn Header="Checked out by" Binding="{Binding LockedBy}" Width="Auto" />
+              <DataGridTextColumn Header="Since" Binding="{Binding LockedAtText}" Width="Auto" />
+              <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="Auto" />
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+      </TabItem>
+      <TabItem x:Name="OutputTab" Header="Output">
+        <TextBox x:Name="OutputBox" IsReadOnly="True" FontFamily="Consolas" FontSize="12" TextWrapping="NoWrap"
+                 HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Margin="4"
+                 Background="{DynamicResource {x:Static vsshell:VsBrushes.WindowKey}}"
+                 Foreground="{DynamicResource {x:Static vsshell:VsBrushes.WindowTextKey}}" />
+      </TabItem>
+    </TabControl>
+
+    <TextBlock x:Name="StatusText" Grid.Row="3" Grid.ColumnSpan="3" Margin="0,6,0,0" TextWrapping="Wrap"
+               Text="Open a repo's sqlsc.yml to start." />
+  </Grid>
+</UserControl>

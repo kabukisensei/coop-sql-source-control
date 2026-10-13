@@ -40,3 +40,25 @@ jobs:
       - run: pip install -e ".[dev]" ruff
       - run: ruff check src tests && ruff format --check src tests
       - run: pytest -v
+
+  ssms-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: dotnet test ssms/Core.Tests --nologo
+
+  ssms-vsix:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build the add-in
+        run: msbuild ssms/Extension/CoopSqlSourceControl.Extension.csproj /restore /p:Configuration=Release /v:minimal /nologo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoopSqlSourceControl-vsix
+          path: ssms/Extension/bin/Release/*.vsix
+          if-no-files-found: error

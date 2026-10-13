@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidPackage">
+    <Groups>
+      <Group guid="guidCommandSet" id="ToolsGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidCommandSet" id="OpenWindowCommand" priority="0x0100" type="Button">
+        <Parent guid="guidCommandSet" id="ToolsGroup" />
+        <Strings>
+          <ButtonText>SQL Source Control</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <Symbols>
+    <GuidSymbol name="guidPackage" value="{772e6ac3-d552-4127-ba5f-3c25fd661535}" />
+    <GuidSymbol name="guidCommandSet" value="{97408c30-cee9-4f28-9089-0df5d62f50f7}">
+      <IDSymbol name="ToolsGroup" value="0x1020" />
+      <IDSymbol name="OpenWindowCommand" value="0x0100" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
