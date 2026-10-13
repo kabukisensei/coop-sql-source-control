@@ -23,12 +23,13 @@ from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table as RichTable
 
-from . import __version__
+from . import __version__, git_ops
 from . import config as config_mod
 from .catalog import read_database
 from .compare import CHANGED, DELETED, NEW, Change, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
+from .deploy import apply, build_plan
 from .layout import delete_object, read_folder, write_object
 from .objects import TYPE_LABELS, ObjectKey
 
@@ -77,6 +78,8 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
       sqlsc status         what differs between the database and the repo
       sqlsc diff dbo.Foo   the text of one difference
       sqlsc script         write the database's objects into the repo folder
+      sqlsc commit -m ...  script the changes and commit just those files
+      sqlsc get-latest     update the database to match the repo
     """
     ctx.obj = Opts(as_json=as_json, config_path=config_path)
 
@@ -276,6 +279,178 @@ def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_ru
             + ("" if dry_run else " Review with `git diff`, then commit.")
         )
     _print_warnings(state.warnings)
+
+
+@main.command()
+@click.argument("objects", nargs=-1)
+@click.option("--target", "-t", "target_name", help="Target to read (default from sqlsc.yml).")
+@click.option("--message", "-m", help="Commit message (default lists the objects).")
+@click.option("--push", is_flag=True, help="Push the branch after committing.")
+@click.pass_obj
+def commit(opts: Opts, objects: tuple[str, ...], target_name: str | None, message: str | None, push: bool) -> None:
+    """Script the database's changes into the repo and commit just those files."""
+    state = _read_state(opts, target_name)
+    changes = _filter(compare(state.db, state.folder), objects)
+    try:
+        root = git_ops.repo_root(state.config.root)
+    except git_ops.GitError as exc:
+        fail(opts, "git", str(exc))
+        raise
+    paths: list[Path] = []
+    for change in changes:
+        if change.action == DELETED:
+            paths.append(delete_object(state.scripts_dir, change.key))
+        else:
+            paths.append(write_object(state.scripts_dir, change.key, change.db_text or ""))
+    sha = None
+    branch = None
+    if paths:
+        text = message or _default_message(state, changes)
+        try:
+            sha = git_ops.commit_paths(root, paths, text)
+            if sha and push:
+                branch = git_ops.push(root)
+        except git_ops.GitError as exc:
+            fail(opts, "git", str(exc))
+            raise
+    emit(
+        opts,
+        {
+            "command": "commit",
+            **state.header(),
+            "commit": sha,
+            "pushed": branch,
+            "summary": summarize(changes),
+            "files": [c.to_json() for c in changes],
+            "warnings": state.warnings,
+        },
+    )
+    if opts.as_json:
+        return
+    _print_header(state)
+    if not sha:
+        console.print("[green]✓[/] Nothing to commit; the repo already matches the database.")
+    else:
+        _print_changes(changes)
+        console.print()
+        console.print(
+            f"[green]✓[/] Committed {len(changes)} object(s) as [bold]{sha}[/]"
+            + (f" and pushed {escape(branch)}." if branch else ".")
+        )
+    _print_warnings(state.warnings)
+
+
+@main.command("get-latest")
+@click.argument("objects", nargs=-1)
+@click.option("--target", "-t", "target_name", help="Database to update (default from sqlsc.yml).")
+@click.option("--dry-run", is_flag=True, help="Print the script instead of running it.")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Write the script to a file instead of running it.",
+)
+@click.option(
+    "--allow-drops", is_flag=True, help="Also drop objects and columns that are in the database but not the repo."
+)
+@click.pass_obj
+def get_latest(
+    opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_run: bool, output: Path | None, allow_drops: bool
+) -> None:
+    """Update the database to match the repo (like Redgate's Get latest)."""
+    state = _read_state(opts, target_name)
+    changes = _filter(compare(state.db, state.folder), objects)
+    plan = build_plan(changes, allow_drops=allow_drops, enforced_keys=state.target.caps["enforced_keys"])
+    script_text = plan.script(state.target)
+    only_script = dry_run or output is not None
+    if not only_script and state.target.protected and plan.runnable:
+        fail(
+            opts,
+            "protected",
+            f"'{state.target.name}' is protected, so get-latest will not change it. "
+            "Use --output to write the script for review, or set `protected: false` on the target.",
+        )
+    if output is not None:
+        output.write_text(script_text, encoding="utf-8")
+
+    result = None
+    remaining: list[Change] = []
+    if not only_script and plan.runnable:
+        spinner = (
+            nullcontext()
+            if opts.as_json
+            else err_console.status(f"Updating {state.target.label} '{state.target.name}'…")
+        )
+        try:
+            with spinner:
+                conn = open_connection(state.target)
+                try:
+                    result = apply(conn, plan, state.target)
+                    after = read_database(conn, state.target).objects
+                finally:
+                    conn.close()
+        except (ConfigError, ConnectError) as exc:
+            fail(opts, "connect", str(exc))
+            raise
+        remaining = _filter(compare(after, state.folder), objects)
+
+    payload: dict[str, Any] = {
+        "command": "get-latest",
+        **state.header(),
+        "applied": result is not None and not result.failed,
+        "steps": [s.to_json() for s in plan.steps],
+        "held_back": [s.to_json() for s in plan.held_back],
+        "warnings": state.warnings,
+    }
+    if output is not None:
+        payload["output"] = str(output)
+    if dry_run:
+        payload["script"] = script_text
+    if result is not None:
+        payload["failed"] = [{"object": k.display, "error": m} for k, m in result.failed]
+        payload["transaction"] = result.transactional
+        payload["still_different"] = [c.to_json() for c in remaining]
+    if opts.as_json:
+        sys.stdout.write(json.dumps({"ok": not (result and result.failed), **payload}, indent=2) + "\n")
+        if result and result.failed:
+            sys.exit(1)
+        return
+
+    _print_header(state)
+    if not plan.steps:
+        console.print("[green]✓[/] Nothing to do; the database already matches the repo.")
+        return
+    if dry_run:
+        console.print(Syntax(script_text, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
+    for step in sorted(plan.steps, key=lambda s: (s.phase, s.key.sort_key)):
+        style = {"create": "green", "alter": "yellow", "drop": "red"}.get(step.action, "dim")
+        console.print(
+            f"  [{style}]{step.action:>7}[/]  {TYPE_LABELS[step.key.type]} {escape(step.key.display)}"
+            + (f"  [dim]{escape('; '.join(step.notes))}[/]" if step.notes else "")
+        )
+    console.print()
+    if output is not None:
+        console.print(f"[green]✓[/] Wrote the script to {escape(str(output))}. Nothing was run.")
+    elif dry_run:
+        console.print("Dry run: nothing was run.")
+    elif result is not None and result.failed:
+        key, message = result.failed[0]
+        undone = " Every change was rolled back." if result.transactional else ""
+        console.print(f"[red]✗[/] {escape(key.display)} failed: {escape(message)}.{undone}")
+        sys.exit(1)
+    elif result is not None:
+        console.print(f"[green]✓[/] Updated {len(result.done)} object(s).")
+        if remaining:
+            console.print(f"[yellow]![/] {len(remaining)} object(s) still differ; run `sqlsc status` to see them.")
+    if plan.held_back:
+        console.print(f"[yellow]![/] {len(plan.held_back)} change(s) were held back (see notes above).")
+    _print_warnings(state.warnings)
+
+
+def _default_message(state: State, changes: list[Change]) -> str:
+    names = ", ".join(c.key.display for c in changes[:5])
+    more = f" and {len(changes) - 5} more" if len(changes) > 5 else ""
+    return f"Update {len(changes)} object(s) from {state.target.name}: {names}{more}"
 
 
 # --- shared plumbing --------------------------------------------------------------

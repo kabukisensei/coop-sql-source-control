@@ -69,3 +69,9 @@ CREATE TABLE dbo.Tag
      ,CHECK (LEN(Label) < 50)
 );
 GO
+-- A view on a view, named so it sorts before the view it reads: a deploy has to
+-- work out the order itself.
+CREATE VIEW sales.vAllTotals
+AS
+SELECT SUM(Total) AS GrandTotal FROM sales.vCustomerTotals;
+GO

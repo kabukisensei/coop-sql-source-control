@@ -3,8 +3,10 @@
 Source control for SQL Server, Azure SQL and Microsoft Fabric databases, in the
 spirit of Redgate SQL Source Control: every object lives in the repo as its own
 `.sql` file, and one command tells you what differs between a database and the
-repo. Object checkout and check-in, get latest, deploy and an SSMS add-in follow
-in later phases (see the [roadmap](#roadmap)).
+repo. `sqlsc commit` puts database changes into git, and `sqlsc get-latest`
+brings a database up to date with the repo. Object checkout and check-in,
+release deploys and an SSMS add-in follow in later phases (see the
+[roadmap](#roadmap)).
 
 It is part of the coop suite: a Python CLI installed with pipx like
 `coop-data-doc`, readable for people, and `--json` on every command for
@@ -27,8 +29,9 @@ cd my-sql-repo
 sqlsc init --kind azure_sql --server myserver.database.windows.net --database Sales
 sqlsc status          # what differs between the database and the repo
 sqlsc diff dbo.Foo    # the text of one difference
-sqlsc script          # write the database's objects into the repo folder
-git add database; git commit -m "Script Sales"
+sqlsc commit -m "Script Sales"   # write the changed objects and commit just those files
+git pull                          # a teammate's changes arrive as files
+sqlsc get-latest                  # apply them to your dev database
 ```
 
 `init` writes `sqlsc.yml` at the repo root and a `.gitattributes` for the
@@ -44,6 +47,8 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo; `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged); `--push` pushes the branch |
+| `sqlsc get-latest [objects…]` | Changes the database to match the repo; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has |
 
 Global options: `--json` prints one JSON document (`{"ok": true, …}`, or
 `{"ok": false, "error": {"kind", "message"}}` with exit code 2), `--config PATH`
@@ -95,6 +100,22 @@ default. An entry in `sqlsc.yml` with the same name is laid over the coop entry
 field by field; Fabric Warehouse and Lakehouse entries need that to add the
 `server`, which coop itself discovers through the Fabric API.
 
+## How get-latest changes a database
+
+- Objects only in the repo are created; foreign keys are added after every new table exists.
+- Views, functions, procedures and triggers that differ are changed with `ALTER`, so their permissions stay.
+  Ones that read each other are retried until they succeed, so file order never matters.
+- Tables are altered, never rebuilt: columns are added, changed (`ALTER COLUMN`) or, with
+  `--allow-drops`, dropped, and constraints and indexes are dropped and added by name. Rows are kept.
+- Changes `ALTER` cannot make safely (a new `IDENTITY`, a changed computed column, removing a
+  constraint SQL Server named itself) are listed as held back, with the reason; everything else runs.
+- On SQL Server, Azure SQL and Fabric SQL database the whole update is one transaction: if any
+  statement fails, nothing changes. Fabric Warehouse and Lakehouse run the statements one by one.
+- Targets named `prod`, `production`, `prd` or `live`, or marked `protected: true`, are never
+  changed by `get-latest`; `--output` still writes the script for review.
+- Column order is not compared: `ALTER TABLE` can only add a column at the end, so a column placed
+  mid-table in the repo lands last in the database and both sides still count as the same.
+
 ## Repo layout
 
 ```
@@ -129,12 +150,14 @@ SQLSC_TEST_SERVER=localhost,1433 SQLSC_PASSWORD='Sqlsc_Dev_Pw1!' pytest   # plus
 ```
 
 The live tests build a sample database, script it, rebuild a second database
-from the files and check that it scripts back identically.
+from the files with `get-latest` and check that it scripts back identically, then
+exercise table alters with data in place, held-back drops, rollback on failure,
+protected targets and `commit`.
 
 ## Roadmap
 
-1. **Script and diff** (this release): `init`, `targets`, `status`, `diff`, `script`.
-2. **Commit and get latest**: `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database in dependency order.
+1. **Script and diff**: `init`, `targets`, `status`, `diff`, `script`.
+2. **Commit and get latest** (this release): `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database.
 3. **Checkout and check-in**: a shared lock table, `checkout`, `checkin`, `locks`, and an optional edit guard on SQL Server and Azure SQL.
 4. **Deploy and static data**: release scripts for test and prod, lookup-table data as `MERGE` scripts.
 5. **SSMS add-in**: a C# shell over the same CLI.
