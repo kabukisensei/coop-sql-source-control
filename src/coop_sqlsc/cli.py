@@ -23,7 +23,7 @@ from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table as RichTable
 
-from . import __version__, git_ops
+from . import __version__, git_ops, locks
 from . import config as config_mod
 from .catalog import read_database
 from .compare import CHANGED, DELETED, NEW, Change, compare, matches, summarize
@@ -31,7 +31,8 @@ from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
 from .deploy import apply, build_plan
 from .layout import delete_object, read_folder, write_object
-from .objects import TYPE_LABELS, ObjectKey
+from .locks import Lock, LockError, LockStore
+from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
@@ -80,6 +81,8 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
       sqlsc script         write the database's objects into the repo folder
       sqlsc commit -m ...  script the changes and commit just those files
       sqlsc get-latest     update the database to match the repo
+      sqlsc checkout X     tell the team you are editing X
+      sqlsc checkin        commit what you checked out and release it
     """
     ctx.obj = Opts(as_json=as_json, config_path=config_path)
 
@@ -176,22 +179,33 @@ def targets(opts: Opts) -> None:
 # --- status / diff / script -------------------------------------------------------
 
 
+AS_OPTION = click.option(
+    "--as",
+    "as_user",
+    envvar="SQLSC_USER",
+    help="Who you are for checkouts (default: git user.email; env SQLSC_USER).",
+)
+
+
 @main.command()
 @click.option("--target", "-t", "target_name", help="Target to compare (default from sqlsc.yml).")
 @click.option("--exit-code", is_flag=True, help="Exit 1 when anything differs (for CI).")
+@AS_OPTION
 @click.pass_obj
-def status(opts: Opts, target_name: str | None, exit_code: bool) -> None:
-    """Show which objects differ between the database and the repo."""
+def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | None) -> None:
+    """Show which objects differ between the database and the repo, and who has them checked out."""
     state = _read_state(opts, target_name)
     changes = compare(state.db, state.folder)
     counts = summarize(changes)
+    held, who = _peek_locks(state, as_user)
     emit(
         opts,
         {
             "command": "status",
             **state.header(),
             "summary": counts,
-            "changes": [c.to_json() for c in changes],
+            "changes": [{**c.to_json(), "locked_by": _owner(held, c.key)} for c in changes],
+            "locks": [lock.to_json() for lock in held.values()],
             "warnings": state.warnings,
         },
     )
@@ -200,11 +214,16 @@ def status(opts: Opts, target_name: str | None, exit_code: bool) -> None:
         if not changes:
             console.print(f"[green]✓[/] The repo matches the database ({len(state.db)} objects).")
         else:
-            _print_changes(changes)
+            _print_changes(changes, held, who)
             console.print()
             console.print(
                 f"{counts[NEW]} new, {counts[CHANGED]} changed, {counts[DELETED]} deleted. "
                 "Run [bold]sqlsc diff <object>[/] to see one, or [bold]sqlsc script[/] to bring the repo up to date."
+            )
+        mine = [lock for lock in held.values() if _same_user(lock.locked_by, who)]
+        if mine:
+            console.print(
+                f"You have {len(mine)} object(s) checked out; [bold]sqlsc checkin[/] commits and releases them."
             )
         _print_warnings(state.warnings)
     if exit_code and changes:
@@ -286,33 +305,30 @@ def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_ru
 @click.option("--target", "-t", "target_name", help="Target to read (default from sqlsc.yml).")
 @click.option("--message", "-m", help="Commit message (default lists the objects).")
 @click.option("--push", is_flag=True, help="Push the branch after committing.")
+@click.option("--force", is_flag=True, help="Also commit objects someone else has checked out.")
+@AS_OPTION
 @click.pass_obj
-def commit(opts: Opts, objects: tuple[str, ...], target_name: str | None, message: str | None, push: bool) -> None:
-    """Script the database's changes into the repo and commit just those files."""
+def commit(
+    opts: Opts,
+    objects: tuple[str, ...],
+    target_name: str | None,
+    message: str | None,
+    push: bool,
+    force: bool,
+    as_user: str | None,
+) -> None:
+    """Script the database's changes into the repo and commit just those files.
+
+    Objects someone else has checked out are left for them to check in, unless --force.
+    """
     state = _read_state(opts, target_name)
     changes = _filter(compare(state.db, state.folder), objects)
-    try:
-        root = git_ops.repo_root(state.config.root)
-    except git_ops.GitError as exc:
-        fail(opts, "git", str(exc))
-        raise
-    paths: list[Path] = []
-    for change in changes:
-        if change.action == DELETED:
-            paths.append(delete_object(state.scripts_dir, change.key))
-        else:
-            paths.append(write_object(state.scripts_dir, change.key, change.db_text or ""))
-    sha = None
-    branch = None
-    if paths:
-        text = message or _default_message(state, changes)
-        try:
-            sha = git_ops.commit_paths(root, paths, text)
-            if sha and push:
-                branch = git_ops.push(root)
-        except git_ops.GitError as exc:
-            fail(opts, "git", str(exc))
-            raise
+    held, who = _peek_locks(state, as_user)
+    skipped: list[Change] = []
+    if not force:
+        skipped = [c for c in changes if c.key in held and not _same_user(held[c.key].locked_by, who)]
+        changes = [c for c in changes if c not in skipped]
+    sha, branch = _commit_changes(opts, state, changes, message, push)
     emit(
         opts,
         {
@@ -322,6 +338,7 @@ def commit(opts: Opts, objects: tuple[str, ...], target_name: str | None, messag
             "pushed": branch,
             "summary": summarize(changes),
             "files": [c.to_json() for c in changes],
+            "skipped": [{**c.to_json(), "locked_by": held[c.key].locked_by} for c in skipped],
             "warnings": state.warnings,
         },
     )
@@ -337,7 +354,38 @@ def commit(opts: Opts, objects: tuple[str, ...], target_name: str | None, messag
             f"[green]✓[/] Committed {len(changes)} object(s) as [bold]{sha}[/]"
             + (f" and pushed {escape(branch)}." if branch else ".")
         )
+    for change in skipped:
+        console.print(
+            f"[yellow]![/] Left {escape(change.key.display)}: checked out by {escape(held[change.key].locked_by)}"
+            " (--force commits it anyway)."
+        )
     _print_warnings(state.warnings)
+
+
+def _commit_changes(
+    opts: Opts, state: State, changes: list[Change], message: str | None, push: bool
+) -> tuple[str | None, str | None]:
+    """Writes the changed object files and commits exactly those. Returns (short sha, pushed branch)."""
+    if not changes:
+        return None, None
+    try:
+        root = git_ops.repo_root(state.config.root)
+    except git_ops.GitError as exc:
+        fail(opts, "git", str(exc))
+        raise
+    paths: list[Path] = []
+    for change in changes:
+        if change.action == DELETED:
+            paths.append(delete_object(state.scripts_dir, change.key))
+        else:
+            paths.append(write_object(state.scripts_dir, change.key, change.db_text or ""))
+    try:
+        sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes))
+        branch = git_ops.push(root) if sha and push else None
+    except git_ops.GitError as exc:
+        fail(opts, "git", str(exc))
+        raise
+    return sha, branch
 
 
 @main.command("get-latest")
@@ -453,6 +501,420 @@ def _default_message(state: State, changes: list[Change]) -> str:
     return f"Update {len(changes)} object(s) from {state.target.name}: {names}{more}"
 
 
+# --- checkout / checkin / locks / unlock / guard ------------------------------------
+
+
+@main.command()
+@click.argument("objects", nargs=-1, required=True)
+@click.option("--target", "-t", "target_name", help="Database being worked on (default from sqlsc.yml).")
+@click.option("--message", "-m", "note", help="A note the team sees next to the lock (why, or until when).")
+@click.option(
+    "--type",
+    "object_type",
+    type=click.Choice(list(OBJECT_TYPES)),
+    help="Check out an object that does not exist yet, as this type.",
+)
+@AS_OPTION
+@click.pass_obj
+def checkout(
+    opts: Opts,
+    objects: tuple[str, ...],
+    target_name: str | None,
+    note: str | None,
+    object_type: str | None,
+    as_user: str | None,
+) -> None:
+    """Check objects out so the team knows you are editing them (e.g. sqlsc checkout dbo.Customer)."""
+    cfg = _load_config(opts)
+    target = _target(opts, cfg, target_name)
+    keys = _resolve(opts, cfg, target, objects, object_type)
+    with _lock_session(opts, cfg, target, as_user) as session:
+        created = _guarded(opts, session.store.ensure)
+        granted, conflicts = _guarded(
+            opts, lambda: session.store.acquire(keys, repo=session.repo, who=session.who, note=note)
+        )
+    payload = {
+        "command": "checkout",
+        **session.header(),
+        "created_lock_table": created,
+        "checked_out": [_key_json(k) for k in granted],
+        "conflicts": [lock.to_json() for lock in conflicts],
+    }
+    if opts.as_json:
+        sys.stdout.write(json.dumps({"ok": not conflicts, **payload}, indent=2) + "\n")
+    else:
+        if created:
+            console.print(f"[dim]Created the lock table sqlsc.ObjectLock in {escape(session.where)}.[/]")
+        for key in granted:
+            console.print(f"[green]✓[/] Checked out {escape(key.display)} to {escape(session.who)}")
+        for lock in conflicts:
+            console.print(f"[red]✗[/] {escape(lock.key.display)} is checked out by {_lock_owner_text(lock)}")
+    if conflicts:
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("objects", nargs=-1)
+@click.option("--target", "-t", "target_name", help="Database to commit from (default from sqlsc.yml).")
+@click.option("--message", "-m", help="Commit message (default lists the objects).")
+@click.option("--push", is_flag=True, help="Push the branch after committing.")
+@click.option("--no-commit", is_flag=True, help="Only release the checkouts (undo checkout); commit nothing.")
+@AS_OPTION
+@click.pass_obj
+def checkin(
+    opts: Opts,
+    objects: tuple[str, ...],
+    target_name: str | None,
+    message: str | None,
+    push: bool,
+    no_commit: bool,
+    as_user: str | None,
+) -> None:
+    """Commit the objects you checked out and release them (all of yours when none are named)."""
+    cfg = _load_config(opts)
+    target = _target(opts, cfg, target_name)
+    with _lock_session(opts, cfg, target, as_user) as session:
+        mine = [lock for lock in _guarded(opts, lambda: session.store.list(session.repo)) if session.owns(lock)]
+        chosen = [lock for lock in mine if not objects or any(matches(lock.key, o) for o in objects)]
+        unknown = [o for o in objects if not any(matches(lock.key, o) for lock in mine)]
+        keys = [lock.key for lock in chosen]
+        sha = branch = None
+        changes: list[Change] = []
+        state = None
+        if keys and not no_commit:
+            state = _read_state(opts, target.name)
+            wanted = set(keys)
+            changes = [c for c in compare(state.db, state.folder) if c.key in wanted]
+            sha, branch = _commit_changes(opts, state, changes, message, push)
+        released, _ = _guarded(opts, lambda: session.store.release(keys, repo=session.repo, who=session.who))
+    payload = {
+        "command": "checkin",
+        **session.header(),
+        "commit": sha,
+        "pushed": branch,
+        "files": [c.to_json() for c in changes],
+        "released": [_key_json(k) for k in released],
+        "not_checked_out": list(unknown),
+    }
+    if opts.as_json:
+        sys.stdout.write(json.dumps({"ok": not unknown, **payload}, indent=2) + "\n")
+    else:
+        if not keys and not unknown:
+            console.print(f"Nothing to check in: {escape(session.who)} has nothing checked out.")
+        if changes:
+            _print_changes(changes)
+        if sha:
+            console.print(
+                f"[green]✓[/] Committed {len(changes)} object(s) as [bold]{sha}[/]"
+                + (f" and pushed {escape(branch)}." if branch else ".")
+            )
+        elif keys and not no_commit:
+            console.print("[dim]The checked-out objects match the repo; nothing to commit.[/]")
+        for key in released:
+            console.print(f"[green]✓[/] Released {escape(key.display)}")
+        for name in unknown:
+            console.print(f"[yellow]![/] {escape(name)} is not checked out by {escape(session.who)}.")
+        if state is not None:
+            _print_warnings(state.warnings)
+    if unknown:
+        sys.exit(1)
+
+
+@main.command("locks")
+@click.option("--target", "-t", "target_name", help="Database being worked on (default from sqlsc.yml).")
+@click.option("--mine", is_flag=True, help="Only your own checkouts.")
+@click.option("--all-repos", is_flag=True, help="Checkouts for every repo that shares this lock table.")
+@AS_OPTION
+@click.pass_obj
+def list_locks(opts: Opts, target_name: str | None, mine: bool, all_repos: bool, as_user: str | None) -> None:
+    """List who has which objects checked out."""
+    cfg = _load_config(opts)
+    target = _target(opts, cfg, target_name)
+    with _lock_session(opts, cfg, target, as_user) as session:
+        rows = _guarded(opts, lambda: session.store.list(None if all_repos else session.repo))
+    if mine:
+        rows = [lock for lock in rows if session.owns(lock)]
+    emit(opts, {"command": "locks", **session.header(), "locks": [lock.to_json() for lock in rows]})
+    if opts.as_json:
+        return
+    if not rows:
+        console.print("Nothing is checked out" + (f" by {escape(session.who)}." if mine else "."))
+        return
+    table = RichTable(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("Object", "Type", "Checked out by", "Since (UTC)", "Note") + (("Repo",) if all_repos else ()):
+        table.add_column(col)
+    for lock in rows:
+        who = escape(lock.locked_by) + (" [dim](you)[/]" if session.owns(lock) else "")
+        cells = [
+            escape(lock.key.display),
+            TYPE_LABELS.get(lock.key.type, lock.key.type),
+            who,
+            lock.locked_at.strftime("%Y-%m-%d %H:%M"),
+            escape(lock.note or ""),
+        ]
+        table.add_row(*cells, *((escape(lock.repo),) if all_repos else ()))
+    console.print(table)
+
+
+@main.command()
+@click.argument("objects", nargs=-1, required=True)
+@click.option("--target", "-t", "target_name", help="Database being worked on (default from sqlsc.yml).")
+@click.option("--force", is_flag=True, help="Release checkouts that belong to someone else.")
+@AS_OPTION
+@click.pass_obj
+def unlock(opts: Opts, objects: tuple[str, ...], target_name: str | None, force: bool, as_user: str | None) -> None:
+    """Release checkouts without committing; someone else's need --force."""
+    cfg = _load_config(opts)
+    target = _target(opts, cfg, target_name)
+    with _lock_session(opts, cfg, target, as_user) as session:
+        held = _guarded(opts, lambda: session.store.list(session.repo))
+        keys = [lock.key for lock in held if any(matches(lock.key, o) for o in objects)]
+        released, refused = _guarded(
+            opts, lambda: session.store.release(keys, repo=session.repo, who=session.who, force=force)
+        )
+    unknown = [o for o in objects if not any(matches(lock.key, o) for lock in held)]
+    payload = {
+        "command": "unlock",
+        **session.header(),
+        "released": [_key_json(k) for k in released],
+        "refused": [lock.to_json() for lock in refused],
+        "not_checked_out": unknown,
+    }
+    if opts.as_json:
+        sys.stdout.write(json.dumps({"ok": not refused, **payload}, indent=2) + "\n")
+    else:
+        for key in released:
+            console.print(f"[green]✓[/] Released {escape(key.display)}")
+        for lock in refused:
+            console.print(
+                f"[red]✗[/] {escape(lock.key.display)} is checked out by {_lock_owner_text(lock)}. "
+                "Use --force to release it anyway."
+            )
+        for name in unknown:
+            console.print(f"[dim]{escape(name)} is not checked out.[/]")
+    if refused:
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("action", type=click.Choice(["install", "remove", "status"]))
+@click.option("--target", "-t", "target_name", help="Database to guard (default from sqlsc.yml).")
+@click.pass_obj
+def guard(opts: Opts, action: str, target_name: str | None) -> None:
+    """Install, remove or check the edit guard: a database trigger that stops anyone
+    changing an object someone else has checked out."""
+    cfg = _load_config(opts)
+    target = _target(opts, cfg, target_name)
+    if target.kind not in locks.GUARD_KINDS:
+        fail(
+            opts,
+            "unsupported",
+            f"The edit guard needs SQL Server, Azure SQL or a Fabric SQL database, not {target.label}.",
+        )
+    if cfg.lock_target and cfg.lock_target != target.name:
+        fail(
+            opts,
+            "unsupported",
+            f"The edit guard reads the lock table in the database it guards, but this repo keeps its locks in "
+            f"'{cfg.lock_target}'. It only works when locks live in '{target.name}' itself.",
+        )
+    try:
+        conn = open_connection(target)
+    except (ConfigError, ConnectError) as exc:
+        fail(opts, "connect", str(exc))
+        raise
+    try:
+        cur = conn.cursor()
+        if action == "install":
+            _guarded(opts, LockStore(conn, transactional=True).ensure)
+            try:
+                cur.execute(locks.GUARD_SQL)
+            except Exception as exc:  # pyodbc.Error
+                fail(opts, "permission", f"Could not create the guard trigger: {_first_error_line(exc)}")
+        elif action == "remove":
+            cur.execute(locks.GUARD_DROP)
+        installed = bool(cur.execute(locks.GUARD_EXISTS).fetchone()[0])
+    finally:
+        conn.close()
+    emit(opts, {"command": "guard", "action": action, "target": target.summary(), "installed": installed})
+    if opts.as_json:
+        return
+    if installed:
+        console.print(
+            f"[green]✓[/] The edit guard is on in {escape(target.database)}: changing an object someone else has "
+            "checked out fails with their name."
+        )
+    else:
+        console.print(f"The edit guard is off in {escape(target.database)}.")
+
+
+# --- lock plumbing -------------------------------------------------------------------
+
+
+@dataclass
+class LockSession:
+    store: LockStore
+    target: config_mod.Target
+    repo: str
+    who: str
+
+    @property
+    def where(self) -> str:
+        return f"{self.target.name} ({self.target.database})"
+
+    def owns(self, lock: Lock) -> bool:
+        return _same_user(lock.locked_by, self.who)
+
+    def header(self) -> dict[str, Any]:
+        return {"lock_target": self.target.summary(), "repo": self.repo, "user": self.who}
+
+
+class _LockSessionContext:
+    def __init__(self, opts: Opts, cfg: config_mod.Config, working: config_mod.Target, as_user: str | None):
+        self.opts, self.cfg, self.working, self.as_user = opts, cfg, working, as_user
+        self.conn: Any = None
+
+    def __enter__(self) -> LockSession:
+        opts, cfg = self.opts, self.cfg
+        try:
+            target = cfg.target(cfg.lock_target) if cfg.lock_target else self.working
+            locks.check_lock_target(target, configured=bool(cfg.lock_target))
+        except ConfigError as exc:
+            fail(opts, "config", str(exc))
+            raise
+        except LockError as exc:
+            fail(opts, "locks", str(exc))
+            raise
+        try:
+            self.conn = open_connection(target)
+        except (ConfigError, ConnectError) as exc:
+            fail(opts, "connect", str(exc))
+            raise
+        store = LockStore(self.conn, transactional=target.kind in locks.TRANSACTIONAL_KINDS)
+        return LockSession(
+            store,
+            target,
+            locks.repo_id(cfg.root, cfg.lock_repo),
+            locks.current_user(cfg.root, self.as_user),
+        )
+
+    def __exit__(self, *exc: object) -> None:
+        if self.conn is not None:
+            self.conn.close()
+
+
+def _lock_session(
+    opts: Opts, cfg: config_mod.Config, working: config_mod.Target, as_user: str | None
+) -> _LockSessionContext:
+    return _LockSessionContext(opts, cfg, working, as_user)
+
+
+def _guarded(opts: Opts, action: Any) -> Any:
+    """Runs a lock-table call, turning its failures into a clean error."""
+    try:
+        return action()
+    except LockError as exc:
+        fail(opts, "locks", str(exc))
+        raise
+    except Exception as exc:  # pyodbc.Error from the lock table
+        fail(opts, "locks", f"The lock table could not be read or changed: {_first_error_line(exc)}")
+        raise
+
+
+def _peek_locks(state: State, as_user: str | None) -> tuple[dict[ObjectKey, Lock], str]:
+    """Current checkouts for this repo, for status and commit. Never fails: a lock
+    database that cannot be reached becomes a warning."""
+    cfg = state.config
+    who = locks.current_user(cfg.root, as_user)
+    try:
+        target = cfg.target(cfg.lock_target) if cfg.lock_target else state.target
+        locks.check_lock_target(target, configured=bool(cfg.lock_target))
+    except (ConfigError, LockError):
+        return {}, who
+    try:
+        conn = open_connection(target)
+        try:
+            rows = LockStore(conn, transactional=False).list(locks.repo_id(cfg.root, cfg.lock_repo))
+        finally:
+            conn.close()
+    except Exception as exc:  # connect or query failure
+        state.warnings.append(f"Checkouts could not be read from '{target.name}': {_first_error_line(exc)}")
+        return {}, who
+    return {lock.key: lock for lock in rows}, who
+
+
+def _resolve(
+    opts: Opts, cfg: config_mod.Config, target: config_mod.Target, names: tuple[str, ...], object_type: str | None
+) -> list[ObjectKey]:
+    """The objects a user's names refer to: files in the repo first, then the live database."""
+    folder, _ = read_folder(cfg.scripts_dir)
+    keys: list[ObjectKey] = []
+    missing: list[str] = []
+    for name in names:
+        found = sorted(k for k in folder if matches(k, name) and (object_type is None or k.type == object_type))
+        if found:
+            keys += found
+        else:
+            missing.append(name)
+    if missing:
+        try:
+            conn = open_connection(target)
+        except (ConfigError, ConnectError) as exc:
+            fail(opts, "connect", str(exc))
+            raise
+        try:
+            for name in missing:
+                key = locks.lookup(conn, name)
+                if key is not None and (object_type is None or key.type == object_type):
+                    keys.append(key)
+                elif object_type is not None:
+                    keys.append(locks.key_from_name(object_type, name))
+                else:
+                    fail(
+                        opts,
+                        "not_found",
+                        f"No object called {name} in the repo or in '{target.name}'. To check out an object "
+                        "you are about to create, add --type (e.g. --type view).",
+                    )
+        finally:
+            conn.close()
+    return list(dict.fromkeys(keys))
+
+
+def _target(opts: Opts, cfg: config_mod.Config, name: str | None) -> config_mod.Target:
+    try:
+        return cfg.target(name)
+    except ConfigError as exc:
+        fail(opts, "config", str(exc))
+        raise
+
+
+def _same_user(a: str, b: str) -> bool:
+    return a.strip().lower() == b.strip().lower()
+
+
+def _owner(held: dict[ObjectKey, Lock], key: ObjectKey) -> str | None:
+    lock = held.get(key)
+    return lock.locked_by if lock else None
+
+
+def _lock_owner_text(lock: Lock) -> str:
+    since = lock.locked_at.strftime("%Y-%m-%d %H:%M")
+    note = f" ({escape(lock.note)})" if lock.note else ""
+    return f"[bold]{escape(lock.locked_by)}[/] since {since} UTC{note}"
+
+
+def _key_json(key: ObjectKey) -> dict[str, str]:
+    return {"object": key.display, "type": key.type, "schema": key.schema, "name": key.name}
+
+
+def _first_error_line(exc: Exception) -> str:
+    text = str(exc.args[1] if len(exc.args) > 1 else exc)
+    return (
+        text.split("(SQLExecDirectW)")[0].replace("[Microsoft][ODBC Driver 18 for SQL Server][SQL Server]", "").strip()
+    )
+
+
 # --- shared plumbing --------------------------------------------------------------
 
 
@@ -532,16 +994,26 @@ def _print_header(state: State) -> None:
     )
 
 
-def _print_changes(changes: list[Change]) -> None:
+def _print_changes(changes: list[Change], held: dict[ObjectKey, Lock] | None = None, who: str = "") -> None:
+    held = held or {}
+    show_locks = any(c.key in held for c in changes)
     table = RichTable(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("Change")
     table.add_column("Type")
     table.add_column("Object")
+    if show_locks:
+        table.add_column("Checked out by")
     for change in changes:
         style = ACTION_STYLE[change.action]
-        table.add_row(
-            f"[{style}]{ACTION_WORDS[change.action]}[/]", TYPE_LABELS[change.key.type], escape(change.key.display)
-        )
+        cells = [f"[{style}]{ACTION_WORDS[change.action]}[/]", TYPE_LABELS[change.key.type], escape(change.key.display)]
+        if show_locks:
+            lock = held.get(change.key)
+            cells.append(
+                ""
+                if lock is None
+                else ("[green]you[/]" if _same_user(lock.locked_by, who) else f"[red]{escape(lock.locked_by)}[/]")
+            )
+        table.add_row(*cells)
     console.print(table)
 
 

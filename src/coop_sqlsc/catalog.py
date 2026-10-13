@@ -25,6 +25,7 @@ from .scripter import (
     script_table,
 )
 
+# The sqlsc schema holds this tool's own lock table; it is never scripted.
 # sysdiagrams and its helper procedures come from SSMS, not from the team.
 _DIAGRAM_OBJECTS = {
     "sysdiagrams",
@@ -45,14 +46,14 @@ FROM sys.objects AS o
 JOIN sys.schemas AS s ON s.schema_id = o.schema_id
 WHERE o.is_ms_shipped = 0
   AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'TR')
-  AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+  AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA', 'sqlsc')
 """
 
 SCHEMAS_SQL = """
 SELECT s.name, p.name
 FROM sys.schemas AS s
 LEFT JOIN sys.database_principals AS p ON p.principal_id = s.principal_id
-WHERE s.schema_id BETWEEN 5 AND 16383
+WHERE s.schema_id BETWEEN 5 AND 16383 AND s.name <> 'sqlsc'
 """
 
 MODULES_SQL = """

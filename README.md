@@ -4,9 +4,9 @@ Source control for SQL Server, Azure SQL and Microsoft Fabric databases, in the
 spirit of Redgate SQL Source Control: every object lives in the repo as its own
 `.sql` file, and one command tells you what differs between a database and the
 repo. `sqlsc commit` puts database changes into git, and `sqlsc get-latest`
-brings a database up to date with the repo. Object checkout and check-in,
-release deploys and an SSMS add-in follow in later phases (see the
-[roadmap](#roadmap)).
+brings a database up to date with the repo. `sqlsc checkout` tells the team
+you are editing an object and `sqlsc checkin` commits it and lets it go. Release
+deploys and an SSMS add-in follow in later phases (see the [roadmap](#roadmap)).
 
 It is part of the coop suite: a Python CLI installed with pipx like
 `coop-data-doc`, readable for people, and `--json` on every command for
@@ -49,11 +49,19 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
 | `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged); `--push` pushes the branch |
 | `sqlsc get-latest [objects…]` | Changes the database to match the repo; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has |
+| `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
+| `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them; `--no-commit` only releases them |
+| `sqlsc locks` | Lists who has what checked out; `--mine` for yours, `--all-repos` for every repo sharing the lock table |
+| `sqlsc unlock objects…` | Releases checkouts without committing; someone else's need `--force` |
+| `sqlsc guard install\|remove\|status` | The optional edit guard (see below) |
 
 Global options: `--json` prints one JSON document (`{"ok": true, …}`, or
 `{"ok": false, "error": {"kind", "message"}}` with exit code 2), `--config PATH`
 uses a specific `sqlsc.yml`, and `-t/--target NAME` picks a target per command.
 No command ever prompts.
+
+You are your git `user.email` for checkouts. `--as NAME` (or the `SQLSC_USER`
+environment variable) overrides it, for an agent or a shared machine.
 
 ## Targets
 
@@ -116,6 +124,37 @@ field by field; Fabric Warehouse and Lakehouse entries need that to add the
 - Column order is not compared: `ALTER TABLE` can only add a column at the end, so a column placed
   mid-table in the repo lands last in the database and both sides still count as the same.
 
+## Checkout and check-in
+
+Checkouts are rows in a small table, `sqlsc.ObjectLock`, which the first
+`sqlsc checkout` creates. By default it lives in the database being worked on,
+which suits a team sharing one dev database. Teams where everyone has their own
+dev database point every clone at one shared database instead:
+
+```yaml
+locks:
+  target: shared   # any target in this file: Azure SQL, SQL Server or Fabric Warehouse
+  repo: sales-db   # optional; locks are scoped by the git origin URL by default
+```
+
+A Fabric Lakehouse or Synapse serverless pool cannot hold the table, so those
+need `locks: target:`. The `sqlsc` schema is never scripted or compared.
+
+- `status` shows who has each changed object checked out.
+- `commit` leaves objects someone else has checked out for them to check in
+  (`--force` commits them anyway); `checkin` commits only your own.
+- Checking out the same object twice is fine; checking out someone else's fails
+  with their name, when they took it and their note, and exits 1.
+
+**The edit guard** (`sqlsc guard install`) goes further on SQL Server, Azure SQL
+and Fabric SQL database: a database-level DDL trigger rolls back an `ALTER`,
+`DROP` or index change to an object that a different login has checked out, and
+says who has it. It reads the lock table in the same database, so it only works
+when locks are not kept elsewhere, and it tells people apart by database login:
+two people sharing one SQL login are the same person to it. Remove it with
+`sqlsc guard remove`. Note that `get-latest` run by someone else is stopped by
+it too, and rolled back as a whole.
+
 ## Repo layout
 
 ```
@@ -152,13 +191,14 @@ SQLSC_TEST_SERVER=localhost,1433 SQLSC_PASSWORD='Sqlsc_Dev_Pw1!' pytest   # plus
 The live tests build a sample database, script it, rebuild a second database
 from the files with `get-latest` and check that it scripts back identically, then
 exercise table alters with data in place, held-back drops, rollback on failure,
-protected targets and `commit`.
+protected targets, `commit`, checkouts between two users, a separate lock
+database, and the edit guard against a second login.
 
 ## Roadmap
 
 1. **Script and diff**: `init`, `targets`, `status`, `diff`, `script`.
-2. **Commit and get latest** (this release): `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database.
-3. **Checkout and check-in**: a shared lock table, `checkout`, `checkin`, `locks`, and an optional edit guard on SQL Server and Azure SQL.
+2. **Commit and get latest**: `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database.
+3. **Checkout and check-in** (this release): a shared lock table, `checkout`, `checkin`, `locks`, `unlock`, and an optional edit guard on SQL Server and Azure SQL.
 4. **Deploy and static data**: release scripts for test and prod, lookup-table data as `MERGE` scripts.
 5. **SSMS add-in**: a C# shell over the same CLI.
 
