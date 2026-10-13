@@ -88,23 +88,31 @@ def read_folder(root: Path) -> tuple[dict[ObjectKey, str], list[str]]:
     Files outside the known folders (a README, deploy scripts) are ignored, not
     reported: the folder may hold more than objects.
     """
+    files: dict[str, str] = {}
+    if root.is_dir():
+        for folder in OBJECT_TYPES.values():
+            base = root / folder
+            if not base.is_dir():
+                continue
+            for path in sorted(base.iterdir()):
+                if path.is_file():
+                    files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8-sig")
+    return objects_from_files(files)
+
+
+def objects_from_files(files: dict[str, str]) -> tuple[dict[ObjectKey, str], list[str]]:
+    """Object scripts from {path relative to the scripts folder: text}, from disk or from a git commit."""
     objects: dict[ObjectKey, str] = {}
     unknown: list[str] = []
-    if not root.is_dir():
-        return objects, unknown
-    for obj_type, folder in OBJECT_TYPES.items():
-        base = root / folder
-        if not base.is_dir():
+    for rel in sorted(files):
+        folder, _, rest = rel.rpartition("/")
+        if folder.lower() not in {f.lower() for f in OBJECT_TYPES.values()} or not rest:
+            continue  # not in an object folder (or in a sub-folder of one): not ours
+        key = key_for_path(rel)
+        if key is None:
+            unknown.append(rel)
             continue
-        for path in sorted(base.iterdir()):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(root).as_posix()
-            key = key_for_path(rel)
-            if key is None or key.type != obj_type:
-                unknown.append(rel)
-                continue
-            objects[key] = normalize(path.read_text(encoding="utf-8-sig"))
+        objects[key] = normalize(files[rel].lstrip("\ufeff"))
     return objects, unknown
 
 

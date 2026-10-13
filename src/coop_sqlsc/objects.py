@@ -19,6 +19,7 @@ OBJECT_TYPES: dict[str, str] = {
     "function": "Functions",
     "procedure": "Stored Procedures",
     "trigger": "Triggers",
+    "data": "Data",
 }
 
 TYPE_LABELS: dict[str, str] = {
@@ -28,6 +29,7 @@ TYPE_LABELS: dict[str, str] = {
     "function": "Function",
     "procedure": "Stored procedure",
     "trigger": "Trigger",
+    "data": "Static data",
 }
 
 

@@ -16,9 +16,12 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
   already uses, so `dev`, `test` and `prod` mean the same thing in both.
 - `status`, `diff` and `targets` only read the catalog. `script` writes files in
   the repo's scripts folder and nothing else; it never runs DDL. `commit` adds a
-  git commit of exactly those files. `get-latest` is the only command that changes
-  a database, never one that is protected (prod), and `get-latest --dry-run` or
-  `--output` shows the script without running it.
+  git commit of exactly those files. `get-latest` and `deploy` are the only commands
+  that change a database's objects or rows. `get-latest` never touches a
+  protected target (prod); `deploy` changes one only with `--confirm <target>`,
+  which the agent passes only after the user approves that release. `--dry-run`
+  and `--output` on either show the script without running it.
+- `data add` and `data remove` only write or delete files under `Data/`.
 - `checkout`, `checkin`, `unlock` and `guard` write only to the `sqlsc` schema
   (the lock table and the guard trigger); `checkin` also makes a git commit.
   A checkout that clashes returns `"ok": false` with the owner in `conflicts`

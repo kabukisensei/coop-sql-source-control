@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,12 +26,13 @@ from rich.table import Table as RichTable
 
 from . import __version__, git_ops, locks
 from . import config as config_mod
+from . import data as data_mod
 from .catalog import read_database
 from .compare import CHANGED, DELETED, NEW, Change, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
-from .deploy import apply, build_plan
-from .layout import delete_object, read_folder, write_object
+from .deploy import Plan, apply, build_plan
+from .layout import delete_object, objects_from_files, read_folder, write_object
 from .locks import Lock, LockError, LockStore
 from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
 
@@ -407,17 +409,48 @@ def get_latest(
 ) -> None:
     """Update the database to match the repo (like Redgate's Get latest)."""
     state = _read_state(opts, target_name)
+    if not (dry_run or output is not None) and state.target.protected:
+        protected_message = (
+            f"'{state.target.name}' is protected, so get-latest will not change it. Use `sqlsc deploy` for a "
+            "release, --output to write the script for review, or set `protected: false` on the target."
+        )
+    else:
+        protected_message = None
+    run_update(
+        opts,
+        state,
+        objects=objects,
+        command="get-latest",
+        dry_run=dry_run,
+        output=output,
+        allow_drops=allow_drops,
+        blocked=protected_message,
+    )
+
+
+def run_update(
+    opts: Opts,
+    state: State,
+    *,
+    objects: tuple[str, ...],
+    command: str,
+    dry_run: bool,
+    output: Path | None,
+    allow_drops: bool,
+    blocked: str | None = None,
+    header: list[str] | None = None,
+    footer: Callable[[Plan], list[str]] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Plans, writes and (unless only a script was asked for) runs the changes that
+    make state.target match state.folder. Shared by get-latest and deploy."""
     changes = _filter(compare(state.db, state.folder), objects)
     plan = build_plan(changes, allow_drops=allow_drops, enforced_keys=state.target.caps["enforced_keys"])
-    script_text = plan.script(state.target)
+    closing = footer(plan) if footer and plan.runnable else []
+    script_text = plan.script(state.target, header, closing)
     only_script = dry_run or output is not None
-    if not only_script and state.target.protected and plan.runnable:
-        fail(
-            opts,
-            "protected",
-            f"'{state.target.name}' is protected, so get-latest will not change it. "
-            "Use --output to write the script for review, or set `protected: false` on the target.",
-        )
+    if blocked and plan.runnable:
+        fail(opts, "protected", blocked)
     if output is not None:
         output.write_text(script_text, encoding="utf-8")
 
@@ -434,7 +467,13 @@ def get_latest(
                 conn = open_connection(state.target)
                 try:
                     result = apply(conn, plan, state.target)
+                    if closing and not result.failed:
+                        cur = conn.cursor()
+                        for statement in closing:
+                            cur.execute(statement)
                     after = read_database(conn, state.target).objects
+                    tracked = [k for k in state.folder if k.type == "data"]
+                    _read_static_data(conn, state.target, tracked, after)
                 finally:
                     conn.close()
         except (ConfigError, ConnectError) as exc:
@@ -443,8 +482,9 @@ def get_latest(
         remaining = _filter(compare(after, state.folder), objects)
 
     payload: dict[str, Any] = {
-        "command": "get-latest",
+        "command": command,
         **state.header(),
+        **(extra or {}),
         "applied": result is not None and not result.failed,
         "steps": [s.to_json() for s in plan.steps],
         "held_back": [s.to_json() for s in plan.held_back],
@@ -471,7 +511,7 @@ def get_latest(
     if dry_run:
         console.print(Syntax(script_text, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
     for step in sorted(plan.steps, key=lambda s: (s.phase, s.key.sort_key)):
-        style = {"create": "green", "alter": "yellow", "drop": "red"}.get(step.action, "dim")
+        style = {"create": "green", "alter": "yellow", "data": "cyan", "drop": "red"}.get(step.action, "dim")
         console.print(
             f"  [{style}]{step.action:>7}[/]  {TYPE_LABELS[step.key.type]} {escape(step.key.display)}"
             + (f"  [dim]{escape('; '.join(step.notes))}[/]" if step.notes else "")
@@ -942,19 +982,32 @@ def _load_config(opts: Opts) -> config_mod.Config:
         raise  # unreachable; fail exits
 
 
-def _read_state(opts: Opts, target_name: str | None) -> State:
+def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | None = None) -> State:
+    """The database's objects next to the repo's: the working folder, or `files` read from a commit."""
     cfg = _load_config(opts)
     try:
         target = cfg.target(target_name)
     except ConfigError as exc:
         fail(opts, "config", str(exc))
         raise
+    folder, unknown = read_folder(cfg.scripts_dir) if files is None else objects_from_files(files)
+    warnings: list[str] = []
+    # Files for object types this platform cannot hold are left alone, never
+    # reported as deleted (a Lakehouse's tables, a Warehouse's triggers).
+    skipped = {t for t, cap in (("table", "tables"), ("trigger", "triggers")) if not target.caps[cap]}
+    if "table" in skipped:
+        skipped.add("data")
+        warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
+    folder = {k: v for k, v in folder.items() if k.type not in skipped}
     spinner = nullcontext() if opts.as_json else err_console.status(f"Reading {target.label} '{target.name}'…")
     try:
         with spinner:
             conn = open_connection(target)
             try:
                 result = read_database(conn, target)
+                result.warnings += _read_static_data(
+                    conn, target, [k for k in folder if k.type == "data"], result.objects
+                )
             finally:
                 conn.close()
     except ConfigError as exc:
@@ -966,18 +1019,34 @@ def _read_state(opts: Opts, target_name: str | None) -> State:
     except Exception as exc:  # a catalog query the platform refused outright
         fail(opts, "read", f"Reading {target.label} '{target.name}' failed: {exc}")
         raise
-    folder, unknown = read_folder(cfg.scripts_dir)
-    warnings = list(result.warnings)
+    warnings = list(result.warnings) + warnings
     warnings += [
         f"{path} is in an object folder but its name is not schema.object.sql; it was ignored." for path in unknown
     ]
-    # Files for object types this platform cannot hold are left alone, never
-    # reported as deleted (a Lakehouse's tables, a Warehouse's triggers).
-    skipped = {t for t, cap in (("table", "tables"), ("trigger", "triggers")) if not target.caps[cap]}
-    if "table" in skipped:
-        warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
-    folder = {k: v for k, v in folder.items() if k.type not in skipped}
     return State(cfg, target, result.objects, folder, warnings)
+
+
+def _read_static_data(
+    conn: Any, target: config_mod.Target, keys: list[ObjectKey], into: dict[ObjectKey, str]
+) -> list[str]:
+    """Scripts the rows of every table the repo tracks static data for. A table
+    missing from the database is simply absent, so get-latest creates and fills it."""
+    warnings: list[str] = []
+    for key in sorted(keys):
+        try:
+            text, count = data_mod.script_data(conn, key, target)
+        except data_mod.TableMissing:
+            continue
+        except data_mod.DataError as exc:
+            warnings.append(f"Static data for {key.display} was not read: {exc}")
+            continue
+        into[key] = text
+        if count > data_mod.LARGE_TABLE:
+            warnings.append(
+                f"{key.display} holds {count} rows; static data suits small lookup tables "
+                "(sqlsc data remove stops tracking it)."
+            )
+    return warnings
 
 
 def _filter(changes: list[Change], objects: tuple[str, ...]) -> list[Change]:
@@ -1021,6 +1090,8 @@ def _print_warnings(warnings: list[str]) -> None:
     for warning in warnings:
         err_console.print(f"[yellow]![/] {escape(warning)}")
 
+
+from . import cli_release  # noqa: E402,F401  (registers data, deploy and history)
 
 if __name__ == "__main__":  # pragma: no cover
     main()
