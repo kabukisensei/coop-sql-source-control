@@ -11,7 +11,9 @@ repo's side:
 - a table that differs is altered column by column and constraint by
   constraint (a table is never dropped and re-created, so no row is lost);
 - an object only in the database is dropped only with allow_drops, and a
-  dropped column likewise.
+  dropped column likewise;
+- static data runs its MERGE script once every table and code object is in
+  place, retried like code objects when one lookup table refers to another.
 
 Changes that cannot be made safely by ALTER (a new IDENTITY, a changed
 computed column, an unnamed constraint that was removed) are reported as
@@ -26,12 +28,14 @@ from typing import Any
 
 from .compare import CHANGED, DELETED, NEW, Change
 from .config import Target
+from .data import identity_off
 from .objects import ObjectKey, batches
 from .scripter import qualified, quote
 
 # Order steps run in. Drops of code objects go first so nothing they read blocks
-# a table change; table drops go last, after nothing reads them any more.
-PH_DROP_CODE, PH_SCHEMA, PH_TABLE, PH_TABLE_KEYS, PH_CODE, PH_DROP_TABLE, PH_DROP_SCHEMA = range(7)
+# a table change; static data once its tables (and their triggers) exist; table
+# drops last, after nothing reads them any more.
+PH_DROP_CODE, PH_SCHEMA, PH_TABLE, PH_TABLE_KEYS, PH_CODE, PH_DATA, PH_DROP_TABLE, PH_DROP_SCHEMA = range(8)
 
 _DROP_WORD = {"view": "VIEW", "procedure": "PROCEDURE", "function": "FUNCTION", "trigger": "TRIGGER"}
 _TRANSACTIONAL = {"sql_server", "azure_sql", "fabric_sql_database"}
@@ -40,10 +44,11 @@ _TRANSACTIONAL = {"sql_server", "azure_sql", "fabric_sql_database"}
 @dataclass
 class Step:
     key: ObjectKey
-    action: str  # create, alter, drop, skip, manual
+    action: str  # create, alter, drop, data, skip, manual
     phase: int
     statements: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    cleanup: list[str] = field(default_factory=list)  # run if the step fails part way
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -69,12 +74,12 @@ class Plan:
     def held_back(self) -> list[Step]:
         return [s for s in self.steps if s.action in ("skip", "manual")]
 
-    def script(self, target: Target) -> str:
-        lines = [
+    def script(self, target: Target, header: list[str] | None = None, footer: list[str] | None = None) -> str:
+        lines = header or [
             f"-- Get latest for {target.label} '{target.name}' ({target.database}), written by sqlsc.",
             "-- Review before running it anywhere other than a development database.",
-            "",
         ]
+        lines = [*lines, ""]
         for step in sorted(self.runnable, key=lambda s: (s.phase, s.key.sort_key)):
             lines.append(f"-- {step.action}: {step.key.display}")
             for note in step.notes:
@@ -85,6 +90,8 @@ class Plan:
             lines.append("")
         for step in self.held_back:
             lines.append(f"-- not included ({step.action}): {step.key.display}: {'; '.join(step.notes)}")
+        for statement in footer or []:
+            lines += [statement.rstrip(), "GO"]
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -106,6 +113,8 @@ def build_plan(changes: list[Change], *, allow_drops: bool, enforced_keys: bool 
 
 def _create_steps(key: ObjectKey, text: str) -> list[Step]:
     parts = batches(text)
+    if key.type == "data":
+        return [_data_step(key, text)]
     if key.type == "schema":
         return [Step(key, "create", PH_SCHEMA, parts)]
     if key.type == "table":
@@ -120,6 +129,8 @@ def _create_steps(key: ObjectKey, text: str) -> list[Step]:
 
 
 def _drop_step(key: ObjectKey, allow_drops: bool) -> Step:
+    if key.type == "data":  # never happens: rows are only read for tables the repo tracks
+        return Step(key, "skip", PH_DATA, [], ["static data is not tracked in the repo"])
     if key.type == "schema":
         statement, phase = f"DROP SCHEMA {quote(key.name)}", PH_DROP_SCHEMA
     elif key.type == "table":
@@ -136,7 +147,14 @@ def _drop_step(key: ObjectKey, allow_drops: bool) -> Step:
 # --- changes ------------------------------------------------------------------------------
 
 
+def _data_step(key: ObjectKey, text: str) -> Step:
+    off = identity_off(text)
+    return Step(key, "data", PH_DATA, batches(text), cleanup=[off] if off else [])
+
+
 def _change_step(key: ObjectKey, db_text: str, repo_text: str, allow_drops: bool) -> Step:
+    if key.type == "data":
+        return _data_step(key, repo_text)
     if key.type in _DROP_WORD:
         return Step(key, "alter", PH_CODE, [to_alter(b) for b in batches(repo_text)])
     if key.type == "schema":
@@ -364,6 +382,8 @@ _RETRYABLE = (
     "Cannot find the object",
     "is not a recognized",
     "Invalid column name",
+    "conflicted with the FOREIGN KEY constraint",
+    "conflicted with the REFERENCE constraint",
 )
 
 
@@ -399,7 +419,12 @@ def apply(conn: Any, plan: Plan, target: Target) -> ApplyResult:
                         done.append(step.key)
                     except Exception as exc:  # pyodbc.Error
                         message = _first_line(exc)
-                        if phase == PH_CODE and any(word in message for word in _RETRYABLE):
+                        for statement in step.cleanup:
+                            try:
+                                cur.execute(statement)
+                            except Exception:  # noqa: BLE001 - best effort, the real error follows
+                                pass
+                        if phase in (PH_CODE, PH_DATA) and any(word in message for word in _RETRYABLE):
                             deferred.append((step, message))
                         else:
                             raise StepFailed(step.key, message) from exc

@@ -5,8 +5,10 @@ spirit of Redgate SQL Source Control: every object lives in the repo as its own
 `.sql` file, and one command tells you what differs between a database and the
 repo. `sqlsc commit` puts database changes into git, and `sqlsc get-latest`
 brings a database up to date with the repo. `sqlsc checkout` tells the team
-you are editing an object and `sqlsc checkin` commits it and lets it go. Release
-deploys and an SSMS add-in follow in later phases (see the [roadmap](#roadmap)).
+you are editing an object and `sqlsc checkin` commits it and lets it go.
+`sqlsc data add` keeps a lookup table's rows in the repo too, and `sqlsc deploy`
+releases a tagged commit to test or prod. An SSMS add-in follows (see the
+[roadmap](#roadmap)).
 
 It is part of the coop suite: a Python CLI installed with pipx like
 `coop-data-doc`, readable for people, and `--json` on every command for
@@ -54,6 +56,10 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc locks` | Lists who has what checked out; `--mine` for yours, `--all-repos` for every repo sharing the lock table |
 | `sqlsc unlock objects…` | Releases checkouts without committing; someone else's need `--force` |
 | `sqlsc guard install\|remove\|status` | The optional edit guard (see below) |
+| `sqlsc data add tables…` | Starts keeping these tables' rows in the repo as static data |
+| `sqlsc data remove tables…` | Stops keeping them (the rows stay in the database) |
+| `sqlsc deploy` | Releases a commit (`--ref`, default `HEAD`) to a database; `--output FILE` writes the script for review, `--confirm NAME` is needed for a protected target |
+| `sqlsc history` | Lists the releases `deploy` has made to a database |
 
 Global options: `--json` prints one JSON document (`{"ok": true, …}`, or
 `{"ok": false, "error": {"kind", "message"}}` with exit code 2), `--config PATH`
@@ -155,6 +161,49 @@ two people sharing one SQL login are the same person to it. Remove it with
 `sqlsc guard remove`. Note that `get-latest` run by someone else is stopped by
 it too, and rolled back as a whole.
 
+## Static data
+
+Lookup tables (statuses, countries, settings) often need their rows in source
+control as well as their structure. `sqlsc data add sales.Status` writes
+`Data/sales.Status.sql`; the file being there is what tracks the table, and
+`sqlsc data remove` deletes it. From then on the rows are one more object:
+`status` and `diff` show changed rows, `commit` writes them, and `get-latest` and
+`deploy` apply them.
+
+The file is a single `MERGE` that makes the table hold exactly its rows: missing
+rows are inserted, differing ones updated, extra ones deleted, matched on the
+primary key (or the first unique constraint; a table with neither cannot be
+tracked). Identity values are kept with `IDENTITY_INSERT`. Values are written so
+that the same rows always give the same file: dates in ISO 8601, floats with all
+17 digits, line breaks inside a value as `NCHAR(13)`/`NCHAR(10)`. Comparisons
+are case-sensitive, so `'Ok'` changed to `'OK'` is a change. Computed and
+`rowversion` columns are left out, and `geography`, `geometry` and `sql_variant`
+columns cannot be tracked. Static data suits small tables; `sqlsc` warns above
+1,000 rows. When one tracked table refers to another, `get-latest` retries the
+`MERGE` until the order works out, inside the same transaction.
+
+## Releasing to test and prod
+
+`sqlsc deploy` is `get-latest` for a release: it compares a database with a
+commit of the repo rather than your working folder, so only what has been
+committed (and tagged, if you release by tag) goes out.
+
+```powershell
+sqlsc deploy -t test --ref v1.4                     # straight to test
+sqlsc deploy -t prod --ref v1.4 -o release-v1.4.sql # the script, for review
+sqlsc deploy -t prod --ref v1.4 --confirm prod      # run it
+sqlsc history -t prod                               # what has been released there
+```
+
+The script says which commit it releases and when it was written, against the
+database as it was at that moment, so write it again if the database changes
+before it runs. Protected targets (named `prod`, `production`, `prd` or `live`,
+or `protected: true`) need `--confirm` with the target's name. Every release, run
+by `sqlsc` or by hand from the script in SSMS or sqlcmd, ends by adding a row to
+`sqlsc.Deployment` with the commit, the ref, who prepared it and the login that
+ran it; `sqlsc history` reads that table. Drops still need `--allow-drops`, and
+changes `ALTER` cannot make safely are still held back with the reason.
+
 ## Repo layout
 
 ```
@@ -165,6 +214,7 @@ database/
   Functions/dbo.fn_Double.sql
   Stored Procedures/sales.usp_GetCustomer.sql
   Triggers/sales.trCustomer_Touch.sql
+  Data/sales.Status.sql
 ```
 
 Scripts are deterministic: the same object always produces the same bytes, names
@@ -192,14 +242,15 @@ The live tests build a sample database, script it, rebuild a second database
 from the files with `get-latest` and check that it scripts back identically, then
 exercise table alters with data in place, held-back drops, rollback on failure,
 protected targets, `commit`, checkouts between two users, a separate lock
-database, and the edit guard against a second login.
+database, the edit guard against a second login, static data across every
+column type, and releases by tag to a protected target.
 
 ## Roadmap
 
 1. **Script and diff**: `init`, `targets`, `status`, `diff`, `script`.
 2. **Commit and get latest**: `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database.
-3. **Checkout and check-in** (this release): a shared lock table, `checkout`, `checkin`, `locks`, `unlock`, and an optional edit guard on SQL Server and Azure SQL.
-4. **Deploy and static data**: release scripts for test and prod, lookup-table data as `MERGE` scripts.
+3. **Checkout and check-in**: a shared lock table, `checkout`, `checkin`, `locks`, `unlock`, and an optional edit guard on SQL Server and Azure SQL.
+4. **Deploy and static data** (this release): `deploy` and `history` for test and prod releases, lookup-table rows as `MERGE` scripts.
 5. **SSMS add-in**: a C# shell over the same CLI.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).

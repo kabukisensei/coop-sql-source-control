@@ -248,6 +248,10 @@ LOOKUP_OBJECT = (
     "SELECT RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name FROM sys.objects AS o WHERE o.object_id = OBJECT_ID(?)"
 )
 LOOKUP_SCHEMA = "SELECT name FROM sys.schemas WHERE name = ?"
+LOOKUP_ANY_SCHEMA = (
+    "SELECT RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name FROM sys.objects AS o "
+    "WHERE o.name = ? AND o.is_ms_shipped = 0 AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'TR')"
+)
 
 
 def lookup(conn: Any, name: str) -> ObjectKey | None:
@@ -257,6 +261,10 @@ def lookup(conn: Any, name: str) -> ObjectKey | None:
         return ObjectKey(_LOOKUP_TYPES[row[0]], row[1], row[2])
     bare = name.replace("[", "").replace("]", "").strip()
     if "." not in bare:
+        # A bare name means that object in any schema, as everywhere else in sqlsc, when only one has it.
+        found = conn.cursor().execute(LOOKUP_ANY_SCHEMA, bare).fetchall()
+        if len(found) == 1 and found[0][0] in _LOOKUP_TYPES:
+            return ObjectKey(_LOOKUP_TYPES[found[0][0]], found[0][1], found[0][2])
         row = conn.cursor().execute(LOOKUP_SCHEMA, bare).fetchone()
         if row is not None:
             return ObjectKey("schema", "", row[0])
