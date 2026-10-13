@@ -12,6 +12,9 @@ A repo linked to a database has an `sqlsc.yml` at its root:
         auth: sql
         user: sa
         password_env: SQLSC_PASSWORD
+    locks:                # optional: where checkouts are recorded
+      target: shared      # default: the target being worked on
+      repo: sales-db      # default: the git origin URL
 
 When the repo also has coop's `.coop/project.yml` (here or in a parent folder),
 its `sql_targets` entries are available by name too. An entry in sqlsc.yml with
@@ -136,6 +139,8 @@ class Config:
     targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     coop_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     coop_path: Path | None = None
+    lock_target: str = ""
+    lock_repo: str = ""
 
     @property
     def root(self) -> Path:
@@ -238,6 +243,9 @@ def load(start: Path | None = None, *, config_path: Path | None = None) -> Confi
         default_target=_text(raw.get("target")),
         targets=_mapping(raw.get("targets"), f"`targets` in {path.name}"),
     )
+    locks = _mapping(raw.get("locks"), f"`locks` in {path.name}")
+    config.lock_target = _text(locks.get("target"))
+    config.lock_repo = _text(locks.get("repo"))
     coop = find_coop_contract(path.parent)
     if coop is not None:
         contract = _read_yaml(coop)

@@ -7,7 +7,7 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
 
 - `--json` on every command prints exactly one JSON document on stdout.
   Success is `{"ok": true, "command": …}`; a problem the user must fix is
-  `{"ok": false, "error": {"kind": "config" | "connect" | "read", "message": …}}`
+  `{"ok": false, "error": {"kind": "config" | "connect" | "read" | "locks" | …, "message": …}}`
   with exit code 2. The message is written for a person and says what to do.
 - No command prompts, so nothing hangs under the agent.
 - No password, token or connection string appears in any output. Target
@@ -19,6 +19,10 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
   git commit of exactly those files. `get-latest` is the only command that changes
   a database, never one that is protected (prod), and `get-latest --dry-run` or
   `--output` shows the script without running it.
+- `checkout`, `checkin`, `unlock` and `guard` write only to the `sqlsc` schema
+  (the lock table and the guard trigger); `checkin` also makes a git commit.
+  A checkout that clashes returns `"ok": false` with the owner in `conflicts`
+  and exit code 1.
 
 ## Wiring it into coop-agent (changes in the coop-agent repo, not done yet)
 
@@ -32,9 +36,11 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
 3. Treat `script` and `commit` as writes and `get-latest` as a database change:
    under coop's guardrails each runs only after the user approves, and the agent
    shows `get-latest --dry-run` before running it.
-4. Later phases add `checkout` / `checkin`; the agent should check out an
-   object before editing it, so two people (or a person and the agent) never
-   change the same object at once.
+4. Before the agent edits an object it runs
+   `coop-sqlsc --json checkout <object> --as coop-agent:<user> -m "<task>"`, and
+   stops to tell the user if `conflicts` is not empty. When the work is approved
+   it runs `checkin <object>` so the lock is released with the commit. Naming
+   the agent in `--as` keeps its checkouts apart from the person's own.
 
 ## Example
 
