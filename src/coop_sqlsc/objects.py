@@ -6,6 +6,7 @@ script text for that object. Comparing the two maps is then plain text equality.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Object type -> folder name in the repo. The order is also the order objects are
@@ -60,3 +61,11 @@ def normalize(text: str) -> str:
     while lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines) + "\n" if lines else ""
+
+
+_GO = re.compile(r"^[ \t]*GO[ \t]*(?:--[^\n]*)?$", re.IGNORECASE | re.MULTILINE)
+
+
+def batches(text: str) -> list[str]:
+    """A script split on its GO lines, the way SSMS and sqlcmd split it."""
+    return [b.strip() for b in _GO.split(text) if b.strip()]

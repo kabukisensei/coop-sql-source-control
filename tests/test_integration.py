@@ -9,21 +9,19 @@ import pytest
 from click.testing import CliRunner
 
 from coop_sqlsc.cli import main
-from coop_sqlsc.layout import read_folder
-from coop_sqlsc.objects import OBJECT_TYPES
 
-from .conftest import SAMPLE, batches, run_script
+from .conftest import SAMPLE, run_script
 
 pytestmark = pytest.mark.integration
 
 
-def link(tmp_path: Path, server: str, database: str) -> Path:
+def link(tmp_path: Path, server: str, database: str, *, name: str = "dev") -> Path:
     config = tmp_path / "sqlsc.yml"
     config.write_text(
         "folder: database\n"
-        "target: dev\n"
+        f"target: {name}\n"
         "targets:\n"
-        "  dev:\n"
+        f"  {name}:\n"
         "    kind: sql_server\n"
         f"    server: '{server}'\n"
         f"    database: {database}\n"
@@ -46,7 +44,7 @@ def test_script_then_status_is_clean(tmp_path, server, make_db):
     config = link(tmp_path, server, db)
 
     first = sqlsc(config, "status")
-    assert first["summary"]["new"] == 8, first["changes"]
+    assert first["summary"]["new"] == 9, first["changes"]
     assert {c["object"] for c in first["changes"]} >= {
         "[sales]",
         "[sales].[Customer]",
@@ -58,35 +56,28 @@ def test_script_then_status_is_clean(tmp_path, server, make_db):
     }
 
     written = sqlsc(config, "script")
-    assert len(written["files"]) == 8
+    assert len(written["files"]) == 9
     assert (tmp_path / "database" / "Tables" / "sales.Order.sql").is_file()
 
     again = sqlsc(config, "status")
     assert again["changes"] == []
 
 
-def test_scripts_rebuild_an_identical_database(tmp_path, server, make_db):
-    """The files are complete: running them into an empty database scripts back the same."""
+def test_get_latest_rebuilds_an_identical_database(tmp_path, server, make_db):
+    """The files are complete: get-latest into an empty database scripts back the same."""
     source = make_db(SAMPLE.read_text())
     config = link(tmp_path, server, source)
     sqlsc(config, "script")
 
-    objects, _ = read_folder(tmp_path / "database")
-    order = list(OBJECT_TYPES)
-    # Type order plus foreign keys after every table is enough for the sample;
-    # real dependency ordering arrives with `get-latest` in phase 2.
-    staged: list[tuple[int, int, str]] = []
-    for key, text in objects.items():
-        for batch in batches(text):
-            staged.append((order.index(key.type), 1 if "FOREIGN KEY" in batch else 0, batch))
-    staged.sort(key=lambda s: (s[1] if s[0] == order.index("table") else 0, s[0]))
-    deploy = "\nGO\n".join(batch for _, _, batch in staged) + "\nGO\n"
-    copy = make_db(deploy)
-
     copy_dir = tmp_path / "copy"
     copy_dir.mkdir()
-    config_copy = link(copy_dir, server, copy)
+    config_copy = link(copy_dir, server, make_db())
     (copy_dir / "database").symlink_to(tmp_path / "database", target_is_directory=True)
+
+    result = sqlsc(config_copy, "get-latest")
+    assert result["ok"], result
+    assert result["failed"] == [] and result["transaction"] is True
+    assert result["still_different"] == []
     assert sqlsc(config_copy, "status")["changes"] == []
 
 

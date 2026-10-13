@@ -90,6 +90,7 @@ KINDS: dict[str, dict[str, Any]] = {
 }
 
 AUTH_MODES = ("sql", "windows", "entra", "entra-interactive")
+PROTECTED_NAMES = {"prod", "production", "prd", "live"}
 
 
 @dataclass
@@ -103,6 +104,7 @@ class Target:
     password_env: str = "SQLSC_PASSWORD"
     tenant_id: str = ""
     trust_server_certificate: bool = False
+    protected: bool = False
     source: str = CONFIG_NAME
 
     @property
@@ -113,7 +115,7 @@ class Target:
     def label(self) -> str:
         return KINDS[self.kind]["label"]
 
-    def summary(self) -> dict[str, str]:
+    def summary(self) -> dict[str, Any]:
         """Safe to print or return to an agent: no password, no secret."""
         return {
             "name": self.name,
@@ -121,6 +123,7 @@ class Target:
             "server": self.server,
             "database": self.database,
             "auth": self.auth,
+            "protected": self.protected,
             "source": self.source,
         }
 
@@ -199,6 +202,8 @@ def build_target(name: str, raw: dict[str, Any], *, source: str = CONFIG_NAME) -
         password_env=_text(raw.get("password_env")) or "SQLSC_PASSWORD",
         tenant_id=_text(raw.get("tenant_id")),
         trust_server_certificate=bool(raw.get("trust_server_certificate", False)),
+        # Production is read-only for get-latest unless the entry says otherwise.
+        protected=bool(raw.get("protected", name.lower() in PROTECTED_NAMES)),
         source=source,
     )
 

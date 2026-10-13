@@ -15,7 +15,10 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
 - Targets come from the same `.coop/project.yml` `sql_targets` the agent
   already uses, so `dev`, `test` and `prod` mean the same thing in both.
 - `status`, `diff` and `targets` only read the catalog. `script` writes files in
-  the repo's scripts folder and nothing else; it never runs DDL.
+  the repo's scripts folder and nothing else; it never runs DDL. `commit` adds a
+  git commit of exactly those files. `get-latest` is the only command that changes
+  a database, never one that is protected (prod), and `get-latest --dry-run` or
+  `--output` shows the script without running it.
 
 ## Wiring it into coop-agent (changes in the coop-agent repo, not done yet)
 
@@ -26,8 +29,9 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
    `coop-sqlsc --json <status|diff> [--target <env>] [objects…]` and renders
    the changes into the tool's `content` (object, action, and for `diff` the
    unified diff, within the 12,000-character cap).
-3. Treat `script` as a write: under coop's guardrails it runs only after the
-   user approves, and the agent shows `git diff` before anything is committed.
+3. Treat `script` and `commit` as writes and `get-latest` as a database change:
+   under coop's guardrails each runs only after the user approves, and the agent
+   shows `get-latest --dry-run` before running it.
 4. Later phases add `checkout` / `checkin`; the agent should check out an
    object before editing it, so two people (or a person and the agent) never
    change the same object at once.

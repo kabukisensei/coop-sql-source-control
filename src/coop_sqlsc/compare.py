@@ -13,7 +13,7 @@ import difflib
 from dataclasses import dataclass
 
 from .layout import relative_path
-from .objects import TYPE_LABELS, ObjectKey
+from .objects import TYPE_LABELS, ObjectKey, batches
 
 NEW, CHANGED, DELETED = "new", "changed", "deleted"
 
@@ -55,10 +55,28 @@ def compare(db: dict[ObjectKey, str], folder: dict[ObjectKey, str]) -> list[Chan
             changes.append(Change(key, NEW, db[key], None))
         elif in_folder and not in_db:
             changes.append(Change(key, DELETED, None, folder[key]))
-        elif db[key] != folder[key]:
+        elif comparable(key, db[key]) != comparable(key, folder[key]):
             changes.append(Change(key, CHANGED, db[key], folder[key]))
     changes.sort(key=lambda c: c.key.sort_key)
     return changes
+
+
+def comparable(key: ObjectKey, text: str) -> str:
+    """The text two sides are compared on. For a table, the order of its columns and
+    of the statements after CREATE TABLE does not count: ALTER TABLE can only add
+    columns at the end, so a column inserted mid-table in the repo would otherwise
+    differ forever (SQL Compare ignores column order by default too).
+    """
+    if key.type != "table":
+        return text
+    lines = text.split("\n")
+    try:
+        open_at, close_at = lines.index("("), lines.index(");")
+    except ValueError:
+        return text
+    columns = sorted(line.strip().lstrip(",").strip() for line in lines[open_at + 1 : close_at])
+    rest = sorted(batches("\n".join(lines[close_at + 1 :])))
+    return "\n".join(lines[: open_at + 1] + columns + [");"] + rest)
 
 
 def summarize(changes: list[Change]) -> dict[str, int]:

@@ -220,3 +220,63 @@ def test_cli_errors_are_json_for_agents(tmp_path):
     assert result.exit_code == 2
     payload = json.loads(result.output)
     assert payload["ok"] is False and payload["error"]["kind"] == "config"
+
+
+# --- get-latest planning ------------------------------------------------------------
+
+from coop_sqlsc.compare import Change  # noqa: E402
+from coop_sqlsc.deploy import ManualChange, build_plan, table_changes, to_alter  # noqa: E402
+
+TABLE = """CREATE TABLE dbo.T
+(
+      Id int IDENTITY(1, 1) NOT NULL
+     ,Name nvarchar(50) NOT NULL CONSTRAINT DF_T_Name DEFAULT ('')
+     ,Old int NULL
+);
+GO
+ALTER TABLE dbo.T ADD CONSTRAINT PK_T PRIMARY KEY CLUSTERED (Id);
+GO
+"""
+
+
+def test_to_alter_skips_comments_and_strings():
+    text = "-- CREATE VIEW in a comment\n/* CREATE PROC x */\nCREATE   VIEW dbo.v AS SELECT 'CREATE VIEW' AS a"
+    assert to_alter(text).endswith("ALTER   VIEW dbo.v AS SELECT 'CREATE VIEW' AS a")
+    assert to_alter("create or alter procedure p as select 1").startswith("ALTER procedure")
+
+
+def test_table_changes_alter_in_place():
+    repo = TABLE.replace("nvarchar(50) NOT NULL CONSTRAINT DF_T_Name DEFAULT ('')", "nvarchar(80) NOT NULL") + (
+        "CREATE NONCLUSTERED INDEX IX_T_Name ON dbo.T (Name);\nGO\n"
+    )
+    repo = repo.replace("     ,Old int NULL\n", "     ,New date NULL\n")
+    key = ObjectKey("table", "dbo", "T")
+    held, notes = table_changes(key, TABLE, repo, allow_drops=False)
+    assert "ALTER TABLE dbo.T ADD New date NULL" in held
+    assert "ALTER TABLE dbo.T ALTER COLUMN Name nvarchar(80) NOT NULL" in held
+    assert held[-1] == "CREATE NONCLUSTERED INDEX IX_T_Name ON dbo.T (Name);"
+    assert any("DROP CONSTRAINT" in s and "sys.default_constraints" in s for s in held)
+    assert notes == ["column Old is not in the repo; pass --allow-drops to drop it"]
+    dropped, _ = table_changes(key, TABLE, repo, allow_drops=True)
+    assert "ALTER TABLE dbo.T DROP COLUMN Old" in dropped
+
+
+def test_identity_change_needs_a_migration():
+    with pytest.raises(ManualChange, match="IDENTITY"):
+        table_changes(ObjectKey("table", "dbo", "T"), TABLE, TABLE.replace("IDENTITY(1, 1) ", ""), allow_drops=True)
+
+
+def test_plan_orders_creates_and_holds_back_drops():
+    t = ObjectKey("table", "dbo", "T")
+    v = ObjectKey("view", "dbo", "v")
+    gone = ObjectKey("procedure", "dbo", "p")
+    plan = build_plan(
+        [
+            Change(v, "deleted", None, "CREATE VIEW dbo.v AS SELECT 1 AS a\nGO\n"),
+            Change(t, "deleted", None, TABLE),
+            Change(gone, "new", "CREATE PROCEDURE dbo.p AS SELECT 1\nGO\n", None),
+        ],
+        allow_drops=False,
+    )
+    assert [s.key for s in sorted(plan.runnable, key=lambda s: s.phase)] == [t, v]
+    assert [s.key for s in plan.held_back] == [gone]

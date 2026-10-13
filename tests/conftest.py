@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import os
-import re
 import uuid
 from pathlib import Path
 
 import pytest
 
+from coop_sqlsc.objects import batches
+
 SAMPLE = Path(__file__).parent / "sql" / "sample_db.sql"
-_GO = re.compile(r"^\s*GO\s*$", re.IGNORECASE | re.MULTILINE)
-
-
-def batches(text: str) -> list[str]:
-    return [b.strip() for b in _GO.split(text) if b.strip()]
 
 
 def run_script(conn, text: str) -> None:
@@ -64,3 +60,15 @@ def make_db(server):
         master.cursor().execute(f"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
         master.cursor().execute(f"DROP DATABASE [{name}]")
     master.close()
+
+
+def connect(server: str, database: str):
+    import pyodbc
+
+    from coop_sqlsc.connect import pick_driver
+
+    return pyodbc.connect(
+        f"Driver={{{pick_driver(pyodbc.drivers())}}};Server={server};Database={database};UID=sa;"
+        f"PWD={os.environ['SQLSC_PASSWORD']};Encrypt=yes;TrustServerCertificate=yes;",
+        autocommit=True,
+    )
