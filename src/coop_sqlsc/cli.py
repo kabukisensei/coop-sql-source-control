@@ -14,7 +14,7 @@ import json
 import sys
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +27,12 @@ from rich.table import Table as RichTable
 from . import __version__, git_ops, locks
 from . import config as config_mod
 from . import data as data_mod
-from .catalog import read_database
+from .catalog import platform_schemas, read_database
 from .compare import CHANGED, DELETED, NEW, Change, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
 from .deploy import Plan, apply, build_plan
-from .layout import delete_object, objects_from_files, read_folder, write_object
+from .layout import delete_object, key_for_path, objects_from_files, read_folder, relative_path, write_object
 from .locks import Lock, LockError, LockStore
 from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
 
@@ -324,7 +324,8 @@ def commit(
     Objects someone else has checked out are left for them to check in, unless --force.
     """
     state = _read_state(opts, target_name)
-    changes = _filter(compare(state.db, state.folder), objects)
+    differences = compare(state.db, state.folder)
+    changes = _filter(differences + _uncommitted(state, {c.key for c in differences}), objects)
     held, who = _peek_locks(state, as_user)
     skipped: list[Change] = []
     if not force:
@@ -377,7 +378,9 @@ def _commit_changes(
         raise
     paths: list[Path] = []
     for change in changes:
-        if change.action == DELETED:
+        if change.key in state.uncommitted:
+            paths.append(state.scripts_dir / relative_path(change.key))  # already right on disk; commit as it is
+        elif change.action == DELETED:
             paths.append(delete_object(state.scripts_dir, change.key))
         else:
             paths.append(write_object(state.scripts_dir, change.key, change.db_text or ""))
@@ -624,7 +627,9 @@ def checkin(
         if keys and not no_commit:
             state = _read_state(opts, target.name)
             wanted = set(keys)
-            changes = [c for c in compare(state.db, state.folder) if c.key in wanted]
+            differences = compare(state.db, state.folder)
+            pending = _uncommitted(state, {c.key for c in differences})
+            changes = [c for c in differences + pending if c.key in wanted]
             sha, branch = _commit_changes(opts, state, changes, message, push)
         released, _ = _guarded(opts, lambda: session.store.release(keys, repo=session.repo, who=session.who))
     payload = {
@@ -965,6 +970,8 @@ class State:
     db: dict[ObjectKey, str]
     folder: dict[ObjectKey, str]
     warnings: list[str]
+    # Objects whose file matches the database but not HEAD (see _uncommitted).
+    uncommitted: set[ObjectKey] = field(default_factory=set)
 
     @property
     def scripts_dir(self) -> Path:
@@ -998,7 +1005,12 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     if "table" in skipped:
         skipped.add("data")
         warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
-    folder = {k: v for k, v in folder.items() if k.type not in skipped}
+    platform = platform_schemas(target)
+    folder = {
+        k: v
+        for k, v in folder.items()
+        if k.type not in skipped and (k.name if k.type == "schema" else k.schema) not in platform
+    }
     spinner = nullcontext() if opts.as_json else err_console.status(f"Reading {target.label} '{target.name}'…")
     try:
         with spinner:
@@ -1047,6 +1059,32 @@ def _read_static_data(
                 "(sqlsc data remove stops tracking it)."
             )
     return warnings
+
+
+def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
+    """Object files that already match the database but are not committed yet: written
+    by `script` or `data add`, or edited and applied with get-latest. The database shows
+    no difference for them, yet commit and checkin still owe git these files.
+    Records their keys on state so _commit_changes commits them as they are."""
+    try:
+        root = git_ops.repo_root(state.config.root)
+        dirty = git_ops.uncommitted(root, state.scripts_dir)
+    except git_ops.GitError:
+        return []  # not a repo yet; _commit_changes says so if it gets that far
+    found: list[Change] = []
+    for rel, how in dirty.items():
+        key = key_for_path(rel)
+        if key is None or key in differing:
+            continue
+        if how == "deleted":
+            found.append(Change(key, DELETED, None, None))
+        elif key in state.folder:
+            found.append(Change(key, NEW if how == "added" else CHANGED, state.folder[key], state.folder[key]))
+        else:
+            continue
+        state.uncommitted.add(key)
+    found.sort(key=lambda c: c.key.sort_key)
+    return found
 
 
 def _filter(changes: list[Change], objects: tuple[str, ...]) -> list[Change]:

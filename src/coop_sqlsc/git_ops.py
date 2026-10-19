@@ -45,6 +45,37 @@ def commit_paths(root: Path, paths: list[Path], message: str) -> str | None:
     return _git(root, "rev-parse", "--short", "HEAD")
 
 
+def uncommitted(root: Path, folder: Path) -> dict[str, str]:
+    """Files under folder that differ from HEAD (staged, unstaged or untracked):
+    {path relative to folder: 'added' | 'modified' | 'deleted'}."""
+    prefix = folder.resolve().relative_to(root.resolve()).as_posix()
+    prefix = "" if prefix == "." else prefix + "/"
+    try:
+        done = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", prefix or "."],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git is not installed or not on PATH.") from exc
+    if done.returncode != 0:
+        raise GitError(f"git status failed: {done.stderr.decode('utf-8', 'replace').strip()}")
+    files: dict[str, str] = {}
+    for entry in done.stdout.decode("utf-8", "replace").split("\0"):
+        if len(entry) < 4 or not entry[3:].startswith(prefix):
+            continue
+        xy, path = entry[:2], entry[3:]
+        if "D" in xy:
+            state = "deleted"
+        elif xy == "??" or "A" in xy:
+            state = "added"
+        else:
+            state = "modified"
+        files[path[len(prefix) :]] = state
+    return files
+
+
 def push(root: Path) -> str:
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     _git(root, "push", "-u", "origin", branch)

@@ -215,6 +215,110 @@ def test_cli_init_status_script_round_trip(tmp_path, fake_db):
     assert run(tmp_path, "status", "--exit-code").exit_code == 0
 
 
+def _git(cwd: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_db):
+    # `script`, `data add`, or an edit applied with get-latest leave files that match the
+    # database; commit must still commit them, not report "nothing to commit".
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    view = ObjectKey("view", "dbo", "vSales")
+    fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    assert run(tmp_path, "script").exit_code == 0
+
+    first = run(tmp_path, "--json", "commit", "-m", "Script")
+    assert first.exit_code == 0, first.output
+    assert json.loads(first.output)["summary"] == {"new": 1, "changed": 0, "deleted": 0}
+    assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD") == "database/Views/dbo.vSales.sql"
+
+    # Edited by hand and applied: the database matches the file, HEAD does not.
+    fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 2;\nGO\n"
+    (tmp_path / "database" / "Views" / "dbo.vSales.sql").write_text(fake_db[view], encoding="utf-8")
+    second = json.loads(run(tmp_path, "--json", "commit").output)
+    assert second["summary"] == {"new": 0, "changed": 1, "deleted": 0}
+    assert "SELECT 2" in _git(tmp_path, "show", "HEAD:database/Views/dbo.vSales.sql")
+    assert json.loads(run(tmp_path, "--json", "commit").output)["commit"] is None
+    assert _git(tmp_path, "status", "--porcelain", "--", "database") == ""
+
+
+def test_git_uncommitted_lists_added_modified_and_deleted(tmp_path):
+    from coop_sqlsc import git_ops
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    folder = tmp_path / "db"
+    (folder / "Views").mkdir(parents=True)
+    (folder / "Views" / "dbo.a.sql").write_text("a")
+    (folder / "Views" / "dbo.b.sql").write_text("b")
+    (tmp_path / "outside.sql").write_text("x")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    (folder / "Views" / "dbo.a.sql").write_text("a2")
+    (folder / "Views" / "dbo.b.sql").unlink()
+    (folder / "Views" / "dbo.c d.sql").write_text("c")
+    (tmp_path / "outside.sql").write_text("y")
+    assert git_ops.uncommitted(tmp_path, folder) == {
+        "Views/dbo.a.sql": "modified",
+        "Views/dbo.b.sql": "deleted",
+        "Views/dbo.c d.sql": "added",
+    }
+
+
+def test_fabric_connection_host_from_the_item():
+    from coop_sqlsc.fabric_api import connection_host, item_path
+
+    assert connection_host(
+        "fabric_warehouse", {"properties": {"connectionString": "abc.datawarehouse.fabric.microsoft.com"}}
+    ) == ("abc.datawarehouse.fabric.microsoft.com")
+    lakehouse = {
+        "properties": {"sqlEndpointProperties": {"connectionString": "tcp:xyz.datawarehouse.fabric.microsoft.com,1433"}}
+    }
+    assert connection_host("fabric_lakehouse", lakehouse) == "xyz.datawarehouse.fabric.microsoft.com"
+    assert item_path("fabric_lakehouse", "w", "i").endswith("/workspaces/w/lakehouses/i")
+
+
+def test_coop_fabric_targets_get_their_server_from_the_fabric_api(tmp_path, monkeypatch):
+    from coop_sqlsc import fabric_api
+
+    (tmp_path / ".coop").mkdir()
+    (tmp_path / ".coop" / "project.yml").write_text(
+        "fabric:\n  tenant_id: t-1\nsql_targets:\n  default_environment: dev\n"
+        "  dev:\n    kind: fabric_warehouse\n    workspace_id: w-1\n    item_id: i-1\n    database: WH\n"
+    )
+    (tmp_path / "sqlsc.yml").write_text("folder: database\n")
+    asked = []
+
+    def lookup(kind, workspace_id, item_id, tenant_id=""):
+        asked.append((kind, workspace_id, item_id, tenant_id))
+        return "abc.datawarehouse.fabric.microsoft.com"
+
+    monkeypatch.setattr(fabric_api, "lookup_server", lookup)
+    target = load(tmp_path).target()
+    assert target.server == "abc.datawarehouse.fabric.microsoft.com" and target.tenant_id == "t-1"
+    assert asked == [("fabric_warehouse", "w-1", "i-1", "t-1")]
+
+
+def test_static_data_compares_rows_not_their_order_or_n_prefix():
+    def script(*rows: str) -> str:
+        body = "\n".join(("              " if i == 0 else "             ,") + r for i, r in enumerate(rows))
+        head = "MERGE INTO dbo.S AS target\nUSING\n(\n    SELECT\n    FROM\n    (\n        VALUES\n"
+        return f"{head}{body}\n    ) AS v (id, label)\n) AS source\nGO\n"
+
+    key = ObjectKey("data", "dbo", "S")
+    db = script("(1, 'Open')", "(2, 'Gelöscht')")
+    assert compare({key: db}, {key: script("(2, N'Gelöscht')", "(1, 'Open')")}) == []
+    assert compare({key: db}, {key: script("(1, 'Open')", "(2, 'Geloscht')")})[0].action == CHANGED
+    # An N' inside a quoted value is text, not a prefix.
+    assert compare({key: script("(1, 'A N''x')")}, {key: script("(1, 'A ''x')")})[0].action == CHANGED
+
+
 def test_cli_errors_are_json_for_agents(tmp_path):
     result = CliRunner().invoke(cli_mod.main, ["--json", "--config", str(tmp_path / "missing.yml"), "status"])
     assert result.exit_code == 2

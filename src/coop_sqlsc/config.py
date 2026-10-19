@@ -139,6 +139,7 @@ class Config:
     targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     coop_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     coop_path: Path | None = None
+    coop_tenant_id: str = ""
     lock_target: str = ""
     lock_repo: str = ""
 
@@ -165,6 +166,9 @@ class Config:
             known = ", ".join(self.target_names()) or "none"
             raise ConfigError(f"There is no target called '{chosen}'. Known targets: {known}.")
         merged = {**base, **own}
+        if base and self.coop_tenant_id and not _text(merged.get("tenant_id")):
+            merged["tenant_id"] = self.coop_tenant_id
+        _fill_fabric_server(chosen, merged)
         source = (
             CONFIG_NAME
             if own and not base
@@ -213,6 +217,27 @@ def build_target(name: str, raw: dict[str, Any], *, source: str = CONFIG_NAME) -
     )
 
 
+def _fill_fabric_server(name: str, raw: dict[str, Any]) -> None:
+    """A Fabric Warehouse or Lakehouse entry with workspace_id and item_id but no server
+    (how coop's contract names them) gets its SQL host from the Fabric API."""
+    kind = _text(raw.get("kind"))
+    server = _text(raw.get("server"))
+    workspace_id, item_id = _text(raw.get("workspace_id")), _text(raw.get("item_id"))
+    if kind not in ("fabric_warehouse", "fabric_lakehouse") or (server and not server.upper().startswith("TODO")):
+        return
+    if not workspace_id or not item_id:
+        return  # build_target explains the missing server
+    from .fabric_api import FabricLookupError, lookup_server
+
+    try:
+        raw["server"] = lookup_server(kind, workspace_id, item_id, _text(raw.get("tenant_id")))
+    except FabricLookupError as exc:
+        raise ConfigError(
+            f"Target '{name}' has no server, and looking it up from workspace_id and item_id failed: {exc}. "
+            f"Add `server: <host>` under targets.{name} in {CONFIG_NAME}."
+        ) from exc
+
+
 def find_config(start: Path | None = None) -> Path | None:
     here = (start or Path.cwd()).resolve()
     for folder in (here, *here.parents):
@@ -252,6 +277,9 @@ def load(start: Path | None = None, *, config_path: Path | None = None) -> Confi
         sql_targets = _mapping(contract.get("sql_targets"), "`sql_targets` in .coop/project.yml")
         config.coop_targets = {k: v for k, v in sql_targets.items() if isinstance(v, dict)}
         config.coop_path = coop
+        config.coop_tenant_id = _text(
+            _mapping(contract.get("fabric"), "`fabric` in .coop/project.yml").get("tenant_id")
+        )
         if not config.default_target:
             config.default_target = _text(sql_targets.get("default_environment"))
     return config
