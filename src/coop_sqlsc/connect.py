@@ -86,14 +86,24 @@ def open_connection(target: Target) -> Any:
         conn_str += f"PWD={{{_escape(password_for(target))}}};"
     elif target.auth == "entra":
         attrs[SQL_COPT_SS_ACCESS_TOKEN] = pack_token(entra_token(target))
+
+    def attempt() -> Any:
+        return pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True)
+
+    # Two tries sharing the deadline: a stalled login (seen against Fabric, on and off,
+    # from any caller) is usually followed by a normal one, so a retry hides most stalls.
+    deadline = connect_deadline()
+    first = deadline // 2
     try:
-        conn = connect_within(
-            lambda: pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True), connect_deadline()
-        )
+        try:
+            conn = connect_within(attempt, first)
+        except ConnectTimeout:
+            conn = connect_within(attempt, deadline - first)
     except ConnectTimeout as exc:
+        exc.seconds = deadline
         raise ConnectError(
             f"Could not connect to {target.label} '{target.name}' ({target.server}): it took the connection but "
-            f"did not finish signing in within {exc.seconds} seconds. Try again; if it keeps happening, check "
+            f"did not finish signing in, twice, within {exc.seconds} seconds. Try again; if it keeps happening, check "
             "that the database is running (a paused Fabric capacity or serverless database can take minutes "
             "to wake), or raise SQLSC_CONNECT_TIMEOUT."
         ) from exc

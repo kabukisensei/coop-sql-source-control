@@ -355,6 +355,30 @@ def test_a_connect_that_never_answers_gives_up_at_the_deadline(monkeypatch):
     assert connect_deadline() == 90
 
 
+def test_a_stalled_login_is_retried_once(monkeypatch):
+    import sys
+    import threading
+    import types
+
+    from coop_sqlsc import connect as connect_mod
+
+    calls = []
+    never = threading.Event()
+
+    def fake_connect(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            never.wait()  # the first login never answers
+        return "conn"
+
+    fake = types.SimpleNamespace(pooling=True, Error=Exception, drivers=lambda: ["ODBC Driver 18 for SQL Server"])
+    fake.connect = fake_connect
+    monkeypatch.setitem(sys.modules, "pyodbc", fake)
+    monkeypatch.setenv("SQLSC_CONNECT_TIMEOUT", "5")
+    target = build_target("dev", {"kind": "sql_server", "server": "localhost", "database": "D", "auth": "windows"})
+    assert connect_mod.open_connection(target) == "conn" and len(calls) == 2
+
+
 def test_pooling_is_off_before_pyodbc_creates_its_environment(monkeypatch):
     # pyodbc reads `pooling` once, at its first call (drivers() here); set later, it does
     # nothing, and the driver manager's COM+ context check can hang every connect.
