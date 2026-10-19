@@ -71,6 +71,8 @@
                       ToolTip="Tell the team you are editing the selected objects; with none selected, type the names of objects to check out" />
               <Button x:Name="CheckinButton" Content="Check in" Click="OnCheckinChanges"
                       ToolTip="Commit the selected objects you have checked out, and release them" />
+              <CheckBox x:Name="PushBox" Content="Push" VerticalAlignment="Center" Margin="4,0,0,0"
+                        ToolTip="After Commit or Check in, push the branch to its remote" />
             </WrapPanel>
           </StackPanel>
           <DataGrid x:Name="ChangesGrid" MouseDoubleClick="OnDiff">

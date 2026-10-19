@@ -247,6 +247,21 @@ def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_
     assert _git(tmp_path, "status", "--porcelain", "--", "database") == ""
 
 
+def test_a_failed_push_keeps_the_commit_and_says_so(tmp_path, fake_db):
+    # No remote: the push fails, but the commit happened and must be reported as done.
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    result = run(tmp_path, "--json", "commit", "--push", "-m", "Script")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["commit"] and payload["pushed"] is None
+    assert payload["push_error"].startswith(f"Committed as {payload['commit']}, but the push failed")
+    assert _git(tmp_path, "log", "--format=%s") == "Script"
+
+
 def test_git_uncommitted_lists_added_modified_and_deleted(tmp_path):
     from coop_sqlsc import git_ops
 

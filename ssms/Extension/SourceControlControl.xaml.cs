@@ -245,7 +245,7 @@ namespace CoopSqlSourceControl
             // "Deleted" means the repo has the object and the database does not: dropped here,
             // or a teammate's new object not applied with Get latest yet. Committing removes the file.
             var warning = deletions == 0 ? string.Empty
-                : Environment.NewLine + Environment.NewLine + deletions + " of them delete the object's file from the repo, because "
+                : Environment.NewLine + Environment.NewLine + deletions + " of them would delete the object's file from the repo, because "
                     + Target.Name + " does not have it. If it is new from the repo and not applied yet, use Get latest instead.";
             if ((selected.Count == 0 || deletions > 0)
                 && !Confirm((selected.Count == 0 ? "Commit every change (" + Count(ChangesGrid) + ") from " : "Commit " + selected.Count + " change(s) from ")
@@ -254,7 +254,8 @@ namespace CoopSqlSourceControl
                 return;
             }
 
-            var result = await RunAsync("Committing…", t => client.CommitAsync(Target.Name, Names(selected), CommitMessageBox.Text, t));
+            var push = PushBox.IsChecked == true;
+            var result = await RunAsync(push ? "Committing and pushing…" : "Committing…", t => client.CommitAsync(Target.Name, Names(selected), CommitMessageBox.Text, t, push));
             if (result == null)
             {
                 return;
@@ -268,7 +269,9 @@ namespace CoopSqlSourceControl
                 CommitMessageBox.Clear();
             }
 
-            Say((sha == null ? "Nothing to commit." : "Committed as " + sha + ".")
+            var pushed = result.Json.Value<string>("pushed");
+            var pushError = result.Json.Value<string>("push_error");
+            Say((pushError ?? (sha == null ? "Nothing to commit." : "Committed as " + sha + (pushed != null ? " and pushed " + pushed : string.Empty) + "."))
                 + (skipped.Count > 0 ? " Left for whoever has them checked out: " + string.Join(", ", skipped) + "." : string.Empty));
         }
 
@@ -439,7 +442,8 @@ namespace CoopSqlSourceControl
                 return;
             }
 
-            var result = await RunAsync(commit ? "Checking in…" : "Undoing checkout…", t => client.CheckinAsync(Target.Name, names, CommitMessageBox.Text, commit, t), acceptFailure: true);
+            var push = commit && PushBox.IsChecked == true;
+            var result = await RunAsync(commit ? "Checking in…" : "Undoing checkout…", t => client.CheckinAsync(Target.Name, names, CommitMessageBox.Text, commit, t, push), acceptFailure: true);
             if (result == null)
             {
                 return;
@@ -454,7 +458,9 @@ namespace CoopSqlSourceControl
             }
 
             await RefreshAsync();
-            Say((sha != null ? "Committed as " + sha + ". " : string.Empty)
+            var pushedTo = result.Json.Value<string>("pushed");
+            var pushFailed = result.Json.Value<string>("push_error");
+            Say((pushFailed != null ? pushFailed + " " : sha != null ? "Committed as " + sha + (pushedTo != null ? " and pushed " + pushedTo : string.Empty) + ". " : string.Empty)
                 + "Released " + released + " object(s)."
                 + (notMine.Count > 0 ? " Not checked out by you: " + string.Join(", ", notMine) + "." : string.Empty));
         }
