@@ -521,7 +521,13 @@ namespace CoopSqlSourceControl
             var line = text.Split('\n')[0].Trim();
             var end = line.IndexOf(". ", StringComparison.Ordinal);
             var sentence = end > 0 ? line.Substring(0, end + 1) : line;
-            return sentence.Length <= 300 ? sentence : sentence.Substring(0, 297) + "…";
+            if (sentence.Length > 300)
+            {
+                sentence = sentence.Substring(0, 297);
+            }
+
+            // Cut short (a YAML error's first line, a long driver message): say so.
+            return sentence == text.Trim() || sentence.EndsWith(".", StringComparison.Ordinal) ? sentence : sentence.TrimEnd(':', ',', ' ') + "…";
         }
 
         private void SetEnabled(bool enabled)
