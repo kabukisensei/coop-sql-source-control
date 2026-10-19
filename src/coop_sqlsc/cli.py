@@ -27,7 +27,7 @@ from rich.table import Table as RichTable
 from . import __version__, git_ops, locks
 from . import config as config_mod
 from . import data as data_mod
-from .catalog import read_database
+from .catalog import platform_schemas, read_database
 from .compare import CHANGED, DELETED, NEW, Change, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
@@ -1005,7 +1005,12 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     if "table" in skipped:
         skipped.add("data")
         warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
-    folder = {k: v for k, v in folder.items() if k.type not in skipped}
+    platform = platform_schemas(target)
+    folder = {
+        k: v
+        for k, v in folder.items()
+        if k.type not in skipped and (k.name if k.type == "schema" else k.schema) not in platform
+    }
     spinner = nullcontext() if opts.as_json else err_console.status(f"Reading {target.label} '{target.name}'…")
     try:
         with spinner:

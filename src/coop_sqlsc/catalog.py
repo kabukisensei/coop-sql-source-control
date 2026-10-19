@@ -41,6 +41,14 @@ _DIAGRAM_OBJECTS = {
 # Schemas Fabric creates in every Warehouse, Lakehouse endpoint and SQL database:
 # query insights views and the result-set cache. They are the platform's, not the team's.
 _FABRIC_SYSTEM_SCHEMAS = {"queryinsights", "_rsc"}
+
+
+def platform_schemas(target: Target) -> set[str]:
+    """Schemas the platform owns on this target: never scripted, and files for them
+    (from a repo scripted before they were skipped) are ignored rather than applied."""
+    return _FABRIC_SYSTEM_SCHEMAS if target.kind.startswith("fabric_") else set()
+
+
 _MODULE_TYPES = {"V": "view", "P": "procedure", "FN": "function", "IF": "function", "TF": "function", "TR": "trigger"}
 
 OBJECTS_SQL = """
@@ -152,7 +160,7 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
     collation_rows = rows(COLLATION_SQL, "collation")
     collation = collation_rows[0][0] if collation_rows else None
 
-    skip_schemas = _FABRIC_SYSTEM_SCHEMAS if target.kind.startswith("fabric_") else set()
+    skip_schemas = platform_schemas(target)
     for name, owner in rows(SCHEMAS_SQL, "schemas"):
         if name in skip_schemas:
             continue

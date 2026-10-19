@@ -67,6 +67,8 @@ def comparable(key: ObjectKey, text: str) -> str:
     columns at the end, so a column inserted mid-table in the repo would otherwise
     differ forever (SQL Compare ignores column order by default too).
     """
+    if key.type == "data":
+        return _comparable_data(text)
     if key.type != "table":
         return text
     lines = text.split("\n")
@@ -77,6 +79,40 @@ def comparable(key: ObjectKey, text: str) -> str:
     columns = sorted(line.strip().lstrip(",").strip() for line in lines[open_at + 1 : close_at])
     rest = sorted(batches("\n".join(lines[close_at + 1 :])))
     return "\n".join(lines[: open_at + 1] + columns + [");"] + rest)
+
+
+def _comparable_data(text: str) -> str:
+    """A static data script compared on its rows, not their order or spelling: a hand-edited
+    file with rows out of key order, or N'…' for a varchar column, inserts the same rows as
+    the scripted one, so it must not show as changed forever after it is applied."""
+    lines = text.split("\n")
+    try:
+        start = lines.index("        VALUES") + 1
+    except ValueError:
+        return text
+    end = start
+    while end < len(lines) and not lines[end].startswith("    ) AS v ("):
+        end += 1
+    rows = sorted(_drop_n_prefix(line.strip().lstrip(",").strip()) for line in lines[start:end])
+    return "\n".join(lines[:start] + rows + lines[end:])
+
+
+def _drop_n_prefix(row: str) -> str:
+    """N'x' and 'x' are the same value once CAST to the column's type; quoted text is left alone."""
+    out: list[str] = []
+    in_string = False
+    for i, ch in enumerate(row):
+        if ch == "'":
+            in_string = not in_string
+        elif (
+            not in_string
+            and ch == "N"
+            and row[i + 1 : i + 2] == "'"
+            and not (i and (row[i - 1].isalnum() or row[i - 1] == "_"))
+        ):
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def summarize(changes: list[Change]) -> dict[str, int]:

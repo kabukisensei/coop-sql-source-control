@@ -305,6 +305,20 @@ def test_coop_fabric_targets_get_their_server_from_the_fabric_api(tmp_path, monk
     assert asked == [("fabric_warehouse", "w-1", "i-1", "t-1")]
 
 
+def test_static_data_compares_rows_not_their_order_or_n_prefix():
+    def script(*rows: str) -> str:
+        body = "\n".join(("              " if i == 0 else "             ,") + r for i, r in enumerate(rows))
+        head = "MERGE INTO dbo.S AS target\nUSING\n(\n    SELECT\n    FROM\n    (\n        VALUES\n"
+        return f"{head}{body}\n    ) AS v (id, label)\n) AS source\nGO\n"
+
+    key = ObjectKey("data", "dbo", "S")
+    db = script("(1, 'Open')", "(2, 'Gelöscht')")
+    assert compare({key: db}, {key: script("(2, N'Gelöscht')", "(1, 'Open')")}) == []
+    assert compare({key: db}, {key: script("(1, 'Open')", "(2, 'Geloscht')")})[0].action == CHANGED
+    # An N' inside a quoted value is text, not a prefix.
+    assert compare({key: script("(1, 'A N''x')")}, {key: script("(1, 'A ''x')")})[0].action == CHANGED
+
+
 def test_cli_errors_are_json_for_agents(tmp_path):
     result = CliRunner().invoke(cli_mod.main, ["--json", "--config", str(tmp_path / "missing.yml"), "status"])
     assert result.exit_code == 2
