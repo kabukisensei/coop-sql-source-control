@@ -25,6 +25,7 @@ namespace CoopSqlSourceControl
         private string configPath;
         private bool busy;
         private bool loadingTargets;
+        private CancellationTokenSource running;
 
         public SourceControlControl()
         {
@@ -155,7 +156,13 @@ namespace CoopSqlSourceControl
 
             settings.Remember(configPath, Target.Name);
             SaveSettings();
+            ClearRows(); // the last target's rows must not sit under this one's name
             await RefreshAsync();
+        }
+
+        private void OnCancel(object sender, RoutedEventArgs e)
+        {
+            running?.Cancel();
         }
 
         private async void OnRefresh(object sender, RoutedEventArgs e)
@@ -182,6 +189,7 @@ namespace CoopSqlSourceControl
             var result = await RunAsync("Comparing " + target.Name + " with the repo…", t => client.StatusAsync(target.Name, t));
             if (result == null)
             {
+                ClearRows(); // rows from an earlier answer are no longer known to be true
                 return;
             }
 
@@ -221,6 +229,7 @@ namespace CoopSqlSourceControl
             }
 
             ShowOutput(text.Length == 0 ? "No differences." : text.ToString());
+            Say(text.Length == 0 ? "No differences." : "The differences for " + selected.Count + " object(s) are in Output.");
         }
 
         private async void OnCommit(object sender, RoutedEventArgs e)
@@ -277,6 +286,7 @@ namespace CoopSqlSourceControl
                 return;
             }
 
+            Say("Review the script in Output, then answer the question.");
             if (!Confirm("Run this script against " + target.Name + " (" + target.Database + ")? It makes " + steps + " change(s)."))
             {
                 Say("Get latest was not run; the script is in Output.");
@@ -406,29 +416,54 @@ namespace CoopSqlSourceControl
             }
 
             busy = true;
+            running = new CancellationTokenSource();
             SetEnabled(false);
             Say(doing);
             try
             {
-                var result = await action(CancellationToken.None);
+                var result = await action(running.Token);
                 if (result.Ok || (acceptFailure && result.Json != null && result.ErrorKind == null))
                 {
                     return result;
                 }
 
-                Say(result.ErrorMessage ?? "sqlsc failed.");
-                if (result.ErrorKind == "connect" || result.ErrorKind == "config" || result.ErrorKind == "crash")
+                if (result.ErrorKind == "cancelled")
                 {
-                    ShowOutput(result.ErrorMessage ?? string.Empty, switchTab: false);
+                    Say("Cancelled. A change that was running was stopped; Refresh shows where the database is now.");
+                    return null;
                 }
 
+                // The status line gets the first sentence; the whole message (a driver's
+                // error, a sign-in failure) goes to Output, where it can be read and copied.
+                var message = result.ErrorMessage ?? "sqlsc failed.";
+                var summary = FirstSentence(message);
+                Say(summary == message ? message : summary + " Details are in Output.");
+                ShowOutput(message, switchTab: false);
+                return null;
+            }
+            catch (Exception exc) when (!(exc is OutOfMemoryException))
+            {
+                // Every button handler is async void: an exception escaping it would
+                // reach SSMS's dispatcher and can take the whole IDE down.
+                Say("The add-in hit an unexpected error; details are in Output.");
+                ShowOutput(exc.ToString(), switchTab: false);
                 return null;
             }
             finally
             {
+                running.Dispose();
+                running = null;
                 busy = false;
                 SetEnabled(true);
             }
+        }
+
+        private static string FirstSentence(string text)
+        {
+            var line = text.Split('\n')[0].Trim();
+            var end = line.IndexOf(". ", StringComparison.Ordinal);
+            var sentence = end > 0 ? line.Substring(0, end + 1) : line;
+            return sentence.Length <= 300 ? sentence : sentence.Substring(0, 297) + "…";
         }
 
         private void SetEnabled(bool enabled)
@@ -444,6 +479,7 @@ namespace CoopSqlSourceControl
 
             RepoBox.IsEnabled = enabled;
             TargetBox.IsEnabled = enabled;
+            CancelButton.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
         }
 
         private static IList<string> Names(IEnumerable<ChangeInfo> changes)
@@ -464,9 +500,14 @@ namespace CoopSqlSourceControl
 
         private void ClearGrids()
         {
+            ClearRows();
+            TargetBox.ItemsSource = null;
+        }
+
+        private void ClearRows()
+        {
             ChangesGrid.ItemsSource = null;
             LocksGrid.ItemsSource = null;
-            TargetBox.ItemsSource = null;
         }
 
         private void ShowOutput(string text, bool switchTab = true)

@@ -97,6 +97,8 @@ namespace CoopSqlSourceControl.Core.Tests
             Assert.Equal("dev  (Sales on s)", targets[0].Display);
             Assert.True(targets[0].IsDefault);
             Assert.Equal("gold  (Target 'gold' has no server.)", targets[1].Display);
+            // Screen readers read ToString, not DisplayMemberPath.
+            Assert.Equal(targets[0].Display, targets[0].ToString());
         }
     }
 

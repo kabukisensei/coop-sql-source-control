@@ -48,8 +48,11 @@
     <TextBlock Grid.Row="1" Grid.Column="0" Text="Database" VerticalAlignment="Center" Margin="0,0,8,6" />
     <ComboBox x:Name="TargetBox" Grid.Row="1" Grid.Column="1" Margin="0,0,6,6" DisplayMemberPath="Display"
               SelectionChanged="OnTargetChanged" ToolTip="A target from sqlsc.yml" />
-    <Button x:Name="RefreshButton" Grid.Row="1" Grid.Column="2" Content="Refresh" Click="OnRefresh" Margin="0,0,0,6"
-            HorizontalAlignment="Left" />
+    <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Margin="0,0,0,6">
+      <Button x:Name="RefreshButton" Content="Refresh" Click="OnRefresh" />
+      <Button x:Name="CancelButton" Content="Cancel" Click="OnCancel" Visibility="Collapsed" Margin="0"
+              ToolTip="Stop the running sqlsc command" />
+    </StackPanel>
 
     <TabControl x:Name="Tabs" Grid.Row="2" Grid.ColumnSpan="3" Margin="0,4,0,0">
       <TabItem Header="Changes">

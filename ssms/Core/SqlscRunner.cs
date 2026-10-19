@@ -179,10 +179,29 @@ namespace CoopSqlSourceControl.Core
             }
         }
 
+        /// <summary>
+        /// Stops sqlsc and what it started. sqlsc.exe (pip's and pipx's alike) is a launcher
+        /// whose child python.exe does the work, so killing only the launcher would leave a
+        /// get-latest running against the database after the window said it stopped.
+        /// </summary>
         private static void TryKill(Process process)
         {
             try
             {
+                if (process.HasExited)
+                {
+                    return;
+                }
+
+                using (var taskkill = Process.Start(new ProcessStartInfo("taskkill.exe", "/T /F /PID " + process.Id)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                }))
+                {
+                    taskkill?.WaitForExit(10000);
+                }
+
                 if (!process.HasExited)
                 {
                     process.Kill();
