@@ -29,8 +29,9 @@ coop-agent and CI always agree.
    `.\ssms\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix`
    (`-Uninstall` removes it again).
 
-The add-in targets SSMS 21 and 22, which run on the 64-bit Visual Studio 2022
-shell. Microsoft does not support third-party SSMS extensions officially, so
+The add-in targets SSMS 21, which runs on the 64-bit Visual Studio 2022 (17.x)
+shell, and SSMS 22, which runs on the Visual Studio 2026 (18.x) shell; the
+manifest accepts both. Microsoft does not support third-party SSMS extensions officially, so
 the install copies the files into SSMS's `Extensions` folder the way SSMS
 add-ins traditionally are installed. The same `.vsix` also installs into Visual
 Studio 2022, which is the easiest place to debug it (F5 opens the experimental
