@@ -66,6 +66,12 @@ def open_connection(target: Target) -> Any:
             "(winget install --id Microsoft.msodbcsql.18 -e) and reinstall this tool."
         ) from exc
 
+    # Each run is one short process, so pooling buys nothing; and with it on, the
+    # ODBC driver manager loads comsvcs.dll to ask COM+ for the caller's transaction
+    # context, an RPC that can hang every connect on the machine when COM+ is stuck.
+    # pyodbc reads this once, when it creates its ODBC environment on the first
+    # call, so it must be set before pyodbc.drivers().
+    pyodbc.pooling = False
     driver = pick_driver(list(pyodbc.drivers()))
     if driver is None:
         raise ConnectError(
@@ -77,10 +83,6 @@ def open_connection(target: Target) -> Any:
         conn_str += f"PWD={{{_escape(password_for(target))}}};"
     elif target.auth == "entra":
         attrs[SQL_COPT_SS_ACCESS_TOKEN] = pack_token(entra_token(target))
-    # Each run is one short process, so pooling buys nothing; and with it on, the
-    # ODBC driver manager asks COM for the caller's transaction context, which can
-    # hang when sqlsc runs under a GUI host such as SSMS.
-    pyodbc.pooling = False
     try:
         conn = pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True)
     except pyodbc.Error as exc:
@@ -93,6 +95,7 @@ def entra_token(target: Target) -> str:
         from azure.identity import DefaultAzureCredential
     except ImportError as exc:  # pragma: no cover
         raise ConnectError("azure-identity is missing; reinstall this tool.") from exc
+    quiet_azure_identity()
     kwargs: dict[str, Any] = {"exclude_interactive_browser_credential": True}
     if target.tenant_id:
         kwargs["additionally_allowed_tenants"] = [target.tenant_id]
@@ -102,9 +105,30 @@ def entra_token(target: Target) -> str:
     except Exception as exc:  # azure-identity raises several unrelated types
         raise ConnectError(
             f"Could not get an Entra ID token for '{target.name}'. Run `az login` "
-            f"(add --tenant <id> for another tenant) and try again. Details: {exc}"
+            f"(add --tenant <id> for another tenant) and try again. Details: {token_reason(exc)}"
         ) from exc
     return token.token
+
+
+def quiet_azure_identity() -> None:
+    """azure-identity logs every failed credential, with tracebacks, as WARNING on stderr;
+    sqlsc reports the failure itself (see token_reason)."""
+    import logging
+
+    logging.getLogger("azure.identity").setLevel(logging.ERROR)
+
+
+def token_reason(exc: Exception) -> str:
+    """The useful part of an azure-identity failure: DefaultAzureCredential's message lists
+    every credential it tried, with tracebacks, which buries the one reason that matters
+    (usually the Azure CLI's ERROR line: no login, expired login, unknown tenant)."""
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    if not lines:
+        return type(exc).__name__
+    errors = [line[len("ERROR:") :].strip() for line in lines if line.startswith("ERROR:")]
+    cli = next((e for e in errors if not e.startswith("The command failed")), "")
+    reason = lines[0] + (f" Azure CLI: {cli}" if cli else "")
+    return reason if len(reason) <= 600 else reason[:597] + "..."
 
 
 def pack_token(token: str) -> bytes:

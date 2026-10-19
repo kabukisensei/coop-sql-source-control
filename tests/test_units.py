@@ -319,6 +319,53 @@ def test_static_data_compares_rows_not_their_order_or_n_prefix():
     assert compare({key: script("(1, 'A N''x')")}, {key: script("(1, 'A ''x')")})[0].action == CHANGED
 
 
+def test_token_failures_keep_the_reason_not_the_whole_credential_chain():
+    from coop_sqlsc.connect import token_reason
+
+    chain = (
+        "DefaultAzureCredential failed to retrieve a token from the included credentials.\n"
+        "Attempted credentials:\n\tEnvironmentCredential: unavailable.\n"
+        "\tAzureCliCredential: ERROR: The command failed with an unexpected error. Here is the traceback:\n"
+        "ERROR: AADSTS700082: The refresh token has expired due to inactivity.\n"
+        'Traceback (most recent call last):\n  File "x.py", line 1\n' * 3
+    )
+    reason = token_reason(Exception(chain))
+    assert reason.startswith("DefaultAzureCredential failed")
+    assert "AADSTS700082: The refresh token has expired" in reason and "Traceback" not in reason
+
+
+def test_pooling_is_off_before_pyodbc_creates_its_environment(monkeypatch):
+    # pyodbc reads `pooling` once, at its first call (drivers() here); set later, it does
+    # nothing, and the driver manager's COM+ context check can hang every connect.
+    import sys
+    import types
+
+    from coop_sqlsc import connect as connect_mod
+
+    seen = []
+
+    class FakePyodbc(types.ModuleType):
+        Error = Exception
+
+        def __setattr__(self, name, value):
+            if name == "pooling":
+                seen.append(("pooling", value))
+            super().__setattr__(name, value)
+
+        def drivers(self):
+            seen.append(("drivers", None))
+            return ["ODBC Driver 18 for SQL Server"]
+
+        def connect(self, *args, **kwargs):
+            seen.append(("connect", None))
+            return object()
+
+    monkeypatch.setitem(sys.modules, "pyodbc", FakePyodbc("pyodbc"))
+    target = build_target("dev", {"kind": "sql_server", "server": "localhost", "database": "D", "auth": "windows"})
+    connect_mod.open_connection(target)
+    assert seen[0] == ("pooling", False) and seen.index(("drivers", None)) > 0
+
+
 def test_cli_errors_are_json_for_agents(tmp_path):
     result = CliRunner().invoke(cli_mod.main, ["--json", "--config", str(tmp_path / "missing.yml"), "status"])
     assert result.exit_code == 2
