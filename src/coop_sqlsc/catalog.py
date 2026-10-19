@@ -38,6 +38,9 @@ _DIAGRAM_OBJECTS = {
     "sp_dropdiagram",
     "fn_diagramobjects",
 }
+# Schemas Fabric creates in every Warehouse, Lakehouse endpoint and SQL database:
+# query insights views and the result-set cache. They are the platform's, not the team's.
+_FABRIC_SYSTEM_SCHEMAS = {"queryinsights", "_rsc"}
 _MODULE_TYPES = {"V": "view", "P": "procedure", "FN": "function", "IF": "function", "TF": "function", "TR": "trigger"}
 
 OBJECTS_SQL = """
@@ -149,14 +152,17 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
     collation_rows = rows(COLLATION_SQL, "collation")
     collation = collation_rows[0][0] if collation_rows else None
 
+    skip_schemas = _FABRIC_SYSTEM_SCHEMAS if target.kind.startswith("fabric_") else set()
     for name, owner in rows(SCHEMAS_SQL, "schemas"):
+        if name in skip_schemas:
+            continue
         result.objects[ObjectKey("schema", "", name)] = script_schema(name, owner)
 
     objects = rows(OBJECTS_SQL, "objects", required=True)
     tables: dict[int, Table] = {}
     module_keys: dict[int, ObjectKey] = {}
     for object_id, schema, name, otype in objects:
-        if schema == "dbo" and name in _DIAGRAM_OBJECTS:
+        if (schema == "dbo" and name in _DIAGRAM_OBJECTS) or schema in skip_schemas:
             continue
         if otype == "U":
             if caps["tables"]:

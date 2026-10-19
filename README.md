@@ -49,7 +49,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo; `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
-| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged); `--push` pushes the branch |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`); `--push` pushes the branch |
 | `sqlsc get-latest [objects…]` | Changes the database to match the repo; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
 | `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them; `--no-commit` only releases them |
@@ -111,8 +111,11 @@ managed identity. Set `tenant_id` on a target to pin a tenant.
 When the repo (or a parent folder) has coop's `.coop/project.yml`, its
 `sql_targets` entries are targets too, and its `default_environment` is the
 default. An entry in `sqlsc.yml` with the same name is laid over the coop entry
-field by field; Fabric Warehouse and Lakehouse entries need that to add the
-`server`, which coop itself discovers through the Fabric API.
+field by field. A Fabric Warehouse or Lakehouse entry with `workspace_id` and
+`item_id` but no `server` (how coop names them) gets its SQL host from the
+Fabric API, signed in the same way, with the contract's `fabric.tenant_id`;
+add `server:` in `sqlsc.yml` to skip the lookup. The Fabric system schemas
+`queryinsights` and `_rsc` are never scripted.
 
 ## How get-latest changes a database
 
