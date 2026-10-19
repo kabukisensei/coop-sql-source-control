@@ -3,15 +3,15 @@
   Installs the Coop SQL Source Control add-in into SSMS 21 or 22.
 
 .DESCRIPTION
-  SSMS has no extension manager, so the add-in is installed the way SSMS
-  add-ins always have been: its files are unpacked into a folder under
-  SSMS's Common7\IDE\Extensions, and SSMS picks it up the next time it
-  starts. Run from an elevated PowerShell (Program Files needs it), with
-  SSMS closed.
+  SSMS 21 and 22 register with the Visual Studio installer as their own
+  product (Microsoft.VisualStudio.Product.Ssms) and ship VSIXInstaller.exe,
+  so the add-in installs for the current user the way a Visual Studio
+  extension does: no admin rights and nothing written under Program Files.
+  Run it with SSMS closed; SSMS loads the add-in the next time it starts.
 
 .EXAMPLE
   .\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix
-  .\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix -Ssms "C:\Program Files\Microsoft SQL Server Management Studio 21\Release\Common7\IDE\Ssms.exe"
+  .\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix -Ssms "C:\Program Files\Microsoft SQL Server Management Studio 21\Release\Common7\IDE\SSMS.exe"
   .\install-ssms.ps1 -Uninstall
 #>
 param(
@@ -21,44 +21,44 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$extensionId = 'CoopSqlSourceControl.772e6ac3-d552-4127-ba5f-3c25fd661535'
 
-if (-not $Ssms) {
-    $found = Get-ChildItem -Path "$env:ProgramFiles\Microsoft SQL Server Management Studio *" -Filter Ssms.exe -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -like '*\Common7\IDE\Ssms.exe' } |
-        Sort-Object FullName -Descending
-    if (-not $found) {
-        throw "Could not find SSMS 21 or 22 under $env:ProgramFiles. Pass -Ssms with the path to Ssms.exe."
-    }
-    $Ssms = $found[0].FullName
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (-not (Test-Path $vswhere)) {
+    throw "Could not find $vswhere, which SSMS 21 and 22 install. Is SSMS 21 or 22 installed?"
+}
+$instances = & $vswhere -all -prerelease -products Microsoft.VisualStudio.Product.Ssms -format json | ConvertFrom-Json
+if ($Ssms) {
+    $root = (Resolve-Path $Ssms).Path
+    $instances = @($instances | Where-Object { $root.StartsWith($_.installationPath, [StringComparison]::OrdinalIgnoreCase) })
+}
+$instance = $instances | Sort-Object { [version]$_.installationVersion } -Descending | Select-Object -First 1
+if (-not $instance) {
+    throw 'Could not find SSMS 21 or 22. Pass -Ssms with the path to SSMS.exe.'
 }
 
 if (Get-Process -Name Ssms -ErrorAction SilentlyContinue) {
     throw 'Close SSMS first.'
 }
 
-$target = Join-Path (Split-Path $Ssms) 'Extensions\Cooptimize\CoopSqlSourceControl'
-if (Test-Path $target) {
-    Remove-Item -Recurse -Force $target
-}
-
+$installer = Join-Path $instance.installationPath 'Common7\IDE\VSIXInstaller.exe'
+$log = "coop-sqlsc-vsix-$(Get-Date -Format yyyyMMddHHmmss).log"
 if ($Uninstall) {
-    Write-Host "Removed the add-in from $target"
+    $arguments = @('/quiet', "/instanceIds:$($instance.instanceId)", "/logFile:$log", "/uninstall:$extensionId")
 } else {
     if (-not $Vsix -or -not (Test-Path $Vsix)) {
         throw 'Pass -Vsix with the CoopSqlSourceControl.vsix built by CI (the CoopSqlSourceControl-vsix artifact).'
     }
-    New-Item -ItemType Directory -Force -Path $target | Out-Null
-    $zip = Join-Path $env:TEMP 'CoopSqlSourceControl.zip'
-    Copy-Item $Vsix $zip -Force
-    Expand-Archive -Path $zip -DestinationPath $target -Force
-    Remove-Item $zip
-    Write-Host "Installed the add-in into $target"
+    $arguments = @('/quiet', "/instanceIds:$($instance.instanceId)", "/logFile:$log", "`"$((Resolve-Path $Vsix).Path)`"")
 }
 
-# SSMS caches which extensions it has; clearing the cache makes it look again.
-Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\SSMS" -Directory -ErrorAction SilentlyContinue |
-    ForEach-Object { Join-Path $_.FullName 'ComponentModelCache' } |
-    Where-Object { Test-Path $_ } |
-    ForEach-Object { Remove-Item -Recurse -Force $_ }
+$run = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+if ($run.ExitCode -ne 0) {
+    throw "VSIXInstaller exited with $($run.ExitCode); see $(Join-Path $env:TEMP $log)."
+}
 
-Write-Host 'Start SSMS and open Tools > SQL Source Control.'
+$verb = if ($Uninstall) { 'Removed the add-in from' } else { 'Installed the add-in into' }
+Write-Host "$verb $($instance.displayName) $($instance.installationVersion) for $env:USERNAME."
+if (-not $Uninstall) {
+    Write-Host 'Start SSMS and open Tools > SQL Source Control.'
+}
