@@ -9,8 +9,12 @@ password is ever in the connection string.
 
 from __future__ import annotations
 
+import os
 import re
 import struct
+import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 from .config import ConfigError, Target, password_for
@@ -66,6 +70,12 @@ def open_connection(target: Target) -> Any:
             "(winget install --id Microsoft.msodbcsql.18 -e) and reinstall this tool."
         ) from exc
 
+    # Each run is one short process, so pooling buys nothing; and with it on, the
+    # ODBC driver manager loads comsvcs.dll to ask COM+ for the caller's transaction
+    # context, an RPC that can hang every connect on the machine when COM+ is stuck.
+    # pyodbc reads this once, when it creates its ODBC environment on the first
+    # call, so it must be set before pyodbc.drivers().
+    pyodbc.pooling = False
     driver = pick_driver(list(pyodbc.drivers()))
     if driver is None:
         raise ConnectError(
@@ -77,22 +87,89 @@ def open_connection(target: Target) -> Any:
         conn_str += f"PWD={{{_escape(password_for(target))}}};"
     elif target.auth == "entra":
         attrs[SQL_COPT_SS_ACCESS_TOKEN] = pack_token(entra_token(target))
-    # Each run is one short process, so pooling buys nothing; and with it on, the
-    # ODBC driver manager asks COM for the caller's transaction context, which can
-    # hang when sqlsc runs under a GUI host such as SSMS.
-    pyodbc.pooling = False
+
+    def attempt() -> Any:
+        return pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True)
+
+    # Two tries sharing the deadline: a stalled login (seen against Fabric, on and off,
+    # from any caller) is usually followed by a normal one, so a retry hides most stalls.
+    deadline = connect_deadline()
+    first = deadline // 2
     try:
-        conn = pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True)
+        try:
+            conn = connect_within(attempt, first)
+        except ConnectTimeout:
+            conn = connect_within(attempt, deadline - first)
+    except ConnectTimeout as exc:
+        exc.seconds = deadline
+        raise ConnectError(
+            f"Could not connect to {target.label} '{target.name}' ({target.server}): it took the connection but "
+            f"did not finish signing in, twice, within {exc.seconds} seconds. Try again; if it keeps happening, check "
+            "that the database is running (a paused Fabric capacity or serverless database can take minutes "
+            "to wake), or raise SQLSC_CONNECT_TIMEOUT."
+        ) from exc
     except pyodbc.Error as exc:
         raise ConnectError(_explain(target, exc)) from exc
     return conn
 
 
+class ConnectTimeout(Exception):
+    def __init__(self, seconds: int) -> None:
+        super().__init__(f"no answer within {seconds}s")
+        self.seconds = seconds
+
+
+DEFAULT_CONNECT_DEADLINE = 90
+
+
+def connect_deadline() -> int:
+    """Seconds a connect may take in all, from SQLSC_CONNECT_TIMEOUT (default 90). The
+    driver's own login timeout does not cover every stall: a Fabric endpoint has been
+    seen to accept the TCP connection and never answer the login, for good."""
+    raw = os.environ.get("SQLSC_CONNECT_TIMEOUT", "").strip()
+    try:
+        return max(5, int(raw)) if raw else DEFAULT_CONNECT_DEADLINE
+    except ValueError:
+        return DEFAULT_CONNECT_DEADLINE
+
+
+def connect_within(connect: Callable[[], Any], seconds: int) -> Any:
+    """Runs connect() on a daemon thread and gives up after `seconds`. A connect stuck
+    in the driver cannot be interrupted, but a daemon thread does not keep the process
+    from exiting, so sqlsc still reports the failure and ends."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["conn"] = connect()
+        except BaseException as exc:  # handed back to the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="sqlsc-connect", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise ConnectTimeout(seconds)
+    if "error" in box:
+        raise box["error"]
+    return box["conn"]
+
+
+_tokens: dict[str, Any] = {}
+
+
 def entra_token(target: Target) -> str:
+    """A token for Azure SQL / Fabric, kept for the rest of this run: getting one through
+    `az` takes seconds, and one command often opens two connections (the database and
+    its lock table)."""
+    cached = _tokens.get(target.tenant_id)
+    if cached is not None and cached.expires_on - time.time() > 300:
+        return cached.token
     try:
         from azure.identity import DefaultAzureCredential
     except ImportError as exc:  # pragma: no cover
         raise ConnectError("azure-identity is missing; reinstall this tool.") from exc
+    quiet_azure_identity()
     kwargs: dict[str, Any] = {"exclude_interactive_browser_credential": True}
     if target.tenant_id:
         kwargs["additionally_allowed_tenants"] = [target.tenant_id]
@@ -102,9 +179,31 @@ def entra_token(target: Target) -> str:
     except Exception as exc:  # azure-identity raises several unrelated types
         raise ConnectError(
             f"Could not get an Entra ID token for '{target.name}'. Run `az login` "
-            f"(add --tenant <id> for another tenant) and try again. Details: {exc}"
+            f"(add --tenant <id> for another tenant) and try again. Details: {token_reason(exc)}"
         ) from exc
+    _tokens[target.tenant_id] = token
     return token.token
+
+
+def quiet_azure_identity() -> None:
+    """azure-identity logs every failed credential, with tracebacks, as WARNING on stderr;
+    sqlsc reports the failure itself (see token_reason)."""
+    import logging
+
+    logging.getLogger("azure.identity").setLevel(logging.ERROR)
+
+
+def token_reason(exc: Exception) -> str:
+    """The useful part of an azure-identity failure: DefaultAzureCredential's message lists
+    every credential it tried, with tracebacks, which buries the one reason that matters
+    (usually the Azure CLI's ERROR line: no login, expired login, unknown tenant)."""
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    if not lines:
+        return type(exc).__name__
+    errors = [line[len("ERROR:") :].strip() for line in lines if line.startswith("ERROR:")]
+    cli = next((e for e in errors if not e.startswith("The command failed")), "")
+    reason = lines[0] + (f" Azure CLI: {cli}" if cli else "")
+    return reason if len(reason) <= 600 else reason[:597] + "..."
 
 
 def pack_token(token: str) -> bytes:

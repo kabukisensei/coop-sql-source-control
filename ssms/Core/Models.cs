@@ -20,6 +20,9 @@ namespace CoopSqlSourceControl.Core
             ? Name + "  (" + Database + " on " + Server + ")" + (IsProtected ? "  protected" : string.Empty)
             : Name + "  (" + Problem + ")";
 
+        /// <summary>What a screen reader announces for the item (WPF uses ToString, not DisplayMemberPath).</summary>
+        public override string ToString() => Display;
+
         public static IList<TargetInfo> ListFrom(JObject json)
         {
             return Items(json, "targets").Select(t => new TargetInfo

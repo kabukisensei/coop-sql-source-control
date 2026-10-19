@@ -63,10 +63,13 @@ def _token(tenant_id: str) -> str:
         from azure.identity import DefaultAzureCredential
     except ImportError as exc:  # pragma: no cover
         raise FabricLookupError("azure-identity is missing; reinstall this tool") from exc
+    from .connect import quiet_azure_identity, token_reason
+
+    quiet_azure_identity()
     kwargs: dict[str, Any] = {"exclude_interactive_browser_credential": True}
     if tenant_id:
         kwargs["additionally_allowed_tenants"] = [tenant_id]
     try:
         return DefaultAzureCredential(**kwargs).get_token(FABRIC_SCOPE, tenant_id=tenant_id or None).token
     except Exception as exc:  # azure-identity raises several unrelated types
-        raise FabricLookupError(f"no Entra ID token for the Fabric API; run `az login` ({exc})") from exc
+        raise FabricLookupError(f"no Entra ID token for the Fabric API; run `az login` ({token_reason(exc)})") from exc

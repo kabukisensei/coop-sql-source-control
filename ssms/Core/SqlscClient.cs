@@ -32,9 +32,9 @@ namespace CoopSqlSourceControl.Core
             return Run(token, new[] { "diff", "--target", target }.Concat(objects));
         }
 
-        public Task<CliResult> CommitAsync(string target, IEnumerable<string> objects, string message, CancellationToken token)
+        public Task<CliResult> CommitAsync(string target, IEnumerable<string> objects, string message, CancellationToken token, bool push = false)
         {
-            return Run(token, new[] { "commit", "--target", target }.Concat(Message(message)).Concat(objects));
+            return Run(token, new[] { "commit", "--target", target }.Concat(Push(push)).Concat(Message(message)).Concat(objects));
         }
 
         public Task<CliResult> GetLatestAsync(string target, IEnumerable<string> objects, bool dryRun, CancellationToken token)
@@ -53,12 +53,16 @@ namespace CoopSqlSourceControl.Core
             return Run(token, new[] { "checkout", "--target", target }.Concat(Message(note)).Concat(objects));
         }
 
-        public Task<CliResult> CheckinAsync(string target, IEnumerable<string> objects, string message, bool commit, CancellationToken token)
+        public Task<CliResult> CheckinAsync(string target, IEnumerable<string> objects, string message, bool commit, CancellationToken token, bool push = false)
         {
             var args = new List<string> { "checkin", "--target", target };
             if (!commit)
             {
                 args.Add("--no-commit");
+            }
+            else if (push)
+            {
+                args.Add("--push");
             }
 
             return Run(token, args.Concat(Message(message)).Concat(objects));
@@ -78,6 +82,11 @@ namespace CoopSqlSourceControl.Core
             }
 
             return Run(token, args.Concat(objects));
+        }
+
+        private static IEnumerable<string> Push(bool push)
+        {
+            return push ? new[] { "--push" } : Enumerable.Empty<string>();
         }
 
         private static IEnumerable<string> Message(string message)

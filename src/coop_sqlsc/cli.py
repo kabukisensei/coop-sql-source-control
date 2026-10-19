@@ -339,6 +339,7 @@ def commit(
             **state.header(),
             "commit": sha,
             "pushed": branch,
+            "push_error": state.push_error,
             "summary": summarize(changes),
             "files": [c.to_json() for c in changes],
             "skipped": [{**c.to_json(), "locked_by": held[c.key].locked_by} for c in skipped],
@@ -386,10 +387,18 @@ def _commit_changes(
             paths.append(write_object(state.scripts_dir, change.key, change.db_text or ""))
     try:
         sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes))
-        branch = git_ops.push(root) if sha and push else None
     except git_ops.GitError as exc:
         fail(opts, "git", str(exc))
         raise
+    branch = None
+    if sha and push:
+        # The commit stands whatever the push does: failing here would report the
+        # commit as failed, and checkin would keep the objects checked out.
+        try:
+            branch = git_ops.push(root)
+        except git_ops.GitError as exc:
+            state.push_error = f"Committed as {sha}, but the push failed: {exc}. Push with `git push` once fixed."
+            state.warnings.append(state.push_error)
     return sha, branch
 
 
@@ -637,6 +646,7 @@ def checkin(
         **session.header(),
         "commit": sha,
         "pushed": branch,
+        "push_error": state.push_error if state is not None else None,
         "files": [c.to_json() for c in changes],
         "released": [_key_json(k) for k in released],
         "not_checked_out": list(unknown),
@@ -972,6 +982,7 @@ class State:
     warnings: list[str]
     # Objects whose file matches the database but not HEAD (see _uncommitted).
     uncommitted: set[ObjectKey] = field(default_factory=set)
+    push_error: str | None = None
 
     @property
     def scripts_dir(self) -> Path:

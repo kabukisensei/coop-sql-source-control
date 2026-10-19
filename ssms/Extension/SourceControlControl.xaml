@@ -48,8 +48,11 @@
     <TextBlock Grid.Row="1" Grid.Column="0" Text="Database" VerticalAlignment="Center" Margin="0,0,8,6" />
     <ComboBox x:Name="TargetBox" Grid.Row="1" Grid.Column="1" Margin="0,0,6,6" DisplayMemberPath="Display"
               SelectionChanged="OnTargetChanged" ToolTip="A target from sqlsc.yml" />
-    <Button x:Name="RefreshButton" Grid.Row="1" Grid.Column="2" Content="Refresh" Click="OnRefresh" Margin="0,0,0,6"
-            HorizontalAlignment="Left" />
+    <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Margin="0,0,0,6">
+      <Button x:Name="RefreshButton" Content="Refresh" Click="OnRefresh" />
+      <Button x:Name="CancelButton" Content="Cancel" Click="OnCancel" Visibility="Collapsed" Margin="0"
+              ToolTip="Stop the running sqlsc command" />
+    </StackPanel>
 
     <TabControl x:Name="Tabs" Grid.Row="2" Grid.ColumnSpan="3" Margin="0,4,0,0">
       <TabItem Header="Changes">
@@ -65,9 +68,11 @@
                       ToolTip="Show, then run, the script that makes the database match the repo" />
               <Button x:Name="DiffButton" Content="Diff" Click="OnDiff" ToolTip="Show the text differences" />
               <Button x:Name="CheckoutButton" Content="Check out" Click="OnCheckout"
-                      ToolTip="Tell the team you are editing the selected objects" />
+                      ToolTip="Tell the team you are editing the selected objects; with none selected, type the names of objects to check out" />
               <Button x:Name="CheckinButton" Content="Check in" Click="OnCheckinChanges"
                       ToolTip="Commit the selected objects you have checked out, and release them" />
+              <CheckBox x:Name="PushBox" Content="Push" VerticalAlignment="Center" Margin="4,0,0,0"
+                        ToolTip="After Commit or Check in, push the branch to its remote" />
             </WrapPanel>
           </StackPanel>
           <DataGrid x:Name="ChangesGrid" MouseDoubleClick="OnDiff">

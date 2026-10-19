@@ -247,6 +247,34 @@ def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_
     assert _git(tmp_path, "status", "--porcelain", "--", "database") == ""
 
 
+def test_a_failed_push_keeps_the_commit_and_says_so(tmp_path, fake_db):
+    # No remote: the push fails, but the commit happened and must be reported as done.
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    result = run(tmp_path, "--json", "commit", "--push", "-m", "Script")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["commit"] and payload["pushed"] is None
+    assert payload["push_error"].startswith(f"Committed as {payload['commit']}, but the push failed")
+    assert _git(tmp_path, "log", "--format=%s") == "Script"
+
+
+def test_git_errors_name_the_reason_not_the_hint():
+    from coop_sqlsc.git_ops import _reason
+
+    push = (
+        "fatal: 'C:/x/no-such-remote.git' does not appear to be a git repository\n"
+        "fatal: Could not read from remote repository.\n\n"
+        "Please make sure you have the correct access rights\nand the repository exists.\n"
+    )
+    assert _reason(push) == "'C:/x/no-such-remote.git' does not appear to be a git repository"
+    assert _reason("error: pathspec 'x' did not match\n") == "pathspec 'x' did not match"
+    assert _reason("something odd.\n") == "something odd"
+
+
 def test_git_uncommitted_lists_added_modified_and_deleted(tmp_path):
     from coop_sqlsc import git_ops
 
@@ -317,6 +345,98 @@ def test_static_data_compares_rows_not_their_order_or_n_prefix():
     assert compare({key: db}, {key: script("(1, 'Open')", "(2, 'Geloscht')")})[0].action == CHANGED
     # An N' inside a quoted value is text, not a prefix.
     assert compare({key: script("(1, 'A N''x')")}, {key: script("(1, 'A ''x')")})[0].action == CHANGED
+
+
+def test_token_failures_keep_the_reason_not_the_whole_credential_chain():
+    from coop_sqlsc.connect import token_reason
+
+    chain = (
+        "DefaultAzureCredential failed to retrieve a token from the included credentials.\n"
+        "Attempted credentials:\n\tEnvironmentCredential: unavailable.\n"
+        "\tAzureCliCredential: ERROR: The command failed with an unexpected error. Here is the traceback:\n"
+        "ERROR: AADSTS700082: The refresh token has expired due to inactivity.\n"
+        'Traceback (most recent call last):\n  File "x.py", line 1\n' * 3
+    )
+    reason = token_reason(Exception(chain))
+    assert reason.startswith("DefaultAzureCredential failed")
+    assert "AADSTS700082: The refresh token has expired" in reason and "Traceback" not in reason
+
+
+def test_a_connect_that_never_answers_gives_up_at_the_deadline(monkeypatch):
+    import threading
+    import time
+
+    from coop_sqlsc.connect import ConnectTimeout, connect_deadline, connect_within
+
+    never = threading.Event()
+    start = time.monotonic()
+    with pytest.raises(ConnectTimeout):
+        connect_within(lambda: never.wait(), 1)
+    assert time.monotonic() - start < 5
+    assert connect_within(lambda: "conn", 5) == "conn"
+    with pytest.raises(ValueError):
+        connect_within(lambda: (_ for _ in ()).throw(ValueError("login failed")), 5)
+
+    monkeypatch.setenv("SQLSC_CONNECT_TIMEOUT", "30")
+    assert connect_deadline() == 30
+    monkeypatch.setenv("SQLSC_CONNECT_TIMEOUT", "soon")
+    assert connect_deadline() == 90
+
+
+def test_a_stalled_login_is_retried_once(monkeypatch):
+    import sys
+    import threading
+    import types
+
+    from coop_sqlsc import connect as connect_mod
+
+    calls = []
+    never = threading.Event()
+
+    def fake_connect(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            never.wait()  # the first login never answers
+        return "conn"
+
+    fake = types.SimpleNamespace(pooling=True, Error=Exception, drivers=lambda: ["ODBC Driver 18 for SQL Server"])
+    fake.connect = fake_connect
+    monkeypatch.setitem(sys.modules, "pyodbc", fake)
+    monkeypatch.setenv("SQLSC_CONNECT_TIMEOUT", "5")
+    target = build_target("dev", {"kind": "sql_server", "server": "localhost", "database": "D", "auth": "windows"})
+    assert connect_mod.open_connection(target) == "conn" and len(calls) == 2
+
+
+def test_pooling_is_off_before_pyodbc_creates_its_environment(monkeypatch):
+    # pyodbc reads `pooling` once, at its first call (drivers() here); set later, it does
+    # nothing, and the driver manager's COM+ context check can hang every connect.
+    import sys
+    import types
+
+    from coop_sqlsc import connect as connect_mod
+
+    seen = []
+
+    class FakePyodbc(types.ModuleType):
+        Error = Exception
+
+        def __setattr__(self, name, value):
+            if name == "pooling":
+                seen.append(("pooling", value))
+            super().__setattr__(name, value)
+
+        def drivers(self):
+            seen.append(("drivers", None))
+            return ["ODBC Driver 18 for SQL Server"]
+
+        def connect(self, *args, **kwargs):
+            seen.append(("connect", None))
+            return object()
+
+    monkeypatch.setitem(sys.modules, "pyodbc", FakePyodbc("pyodbc"))
+    target = build_target("dev", {"kind": "sql_server", "server": "localhost", "database": "D", "auth": "windows"})
+    connect_mod.open_connection(target)
+    assert seen[0] == ("pooling", False) and seen.index(("drivers", None)) > 0
 
 
 def test_cli_errors_are_json_for_agents(tmp_path):
