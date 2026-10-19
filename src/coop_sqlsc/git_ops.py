@@ -20,9 +20,19 @@ def _git(cwd: Path, *args: str) -> str:
     except FileNotFoundError as exc:
         raise GitError("git is not installed or not on PATH.") from exc
     if done.returncode != 0:
-        message = (done.stderr or done.stdout).strip().splitlines()
-        raise GitError(f"git {args[0]} failed: {message[-1] if message else 'no output'}")
+        raise GitError(f"git {args[0]} failed: {_reason(done.stderr or done.stdout)}")
     return done.stdout.strip()
+
+
+def _reason(output: str) -> str:
+    """git's own fatal:/error: line: the last line is often the tail of a hint
+    ("and the repository exists.") rather than what went wrong."""
+    lines = [line.strip() for line in output.strip().splitlines() if line.strip()]
+    for prefix in ("fatal:", "error:"):
+        found = [line for line in lines if line.lower().startswith(prefix)]
+        if found:
+            return found[0][len(prefix) :].strip().rstrip(".")
+    return lines[-1].rstrip(".") if lines else "no output"
 
 
 def repo_root(path: Path) -> Path:

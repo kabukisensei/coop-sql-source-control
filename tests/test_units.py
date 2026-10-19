@@ -262,6 +262,19 @@ def test_a_failed_push_keeps_the_commit_and_says_so(tmp_path, fake_db):
     assert _git(tmp_path, "log", "--format=%s") == "Script"
 
 
+def test_git_errors_name_the_reason_not_the_hint():
+    from coop_sqlsc.git_ops import _reason
+
+    push = (
+        "fatal: 'C:/x/no-such-remote.git' does not appear to be a git repository\n"
+        "fatal: Could not read from remote repository.\n\n"
+        "Please make sure you have the correct access rights\nand the repository exists.\n"
+    )
+    assert _reason(push) == "'C:/x/no-such-remote.git' does not appear to be a git repository"
+    assert _reason("error: pathspec 'x' did not match\n") == "pathspec 'x' did not match"
+    assert _reason("something odd.\n") == "something odd"
+
+
 def test_git_uncommitted_lists_added_modified_and_deleted(tmp_path):
     from coop_sqlsc import git_ops
 
