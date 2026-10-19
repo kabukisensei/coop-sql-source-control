@@ -77,6 +77,10 @@ def open_connection(target: Target) -> Any:
         conn_str += f"PWD={{{_escape(password_for(target))}}};"
     elif target.auth == "entra":
         attrs[SQL_COPT_SS_ACCESS_TOKEN] = pack_token(entra_token(target))
+    # Each run is one short process, so pooling buys nothing; and with it on, the
+    # ODBC driver manager asks COM for the caller's transaction context, which can
+    # hang when sqlsc runs under a GUI host such as SSMS.
+    pyodbc.pooling = False
     try:
         conn = pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True)
     except pyodbc.Error as exc:
