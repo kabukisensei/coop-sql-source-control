@@ -7,8 +7,8 @@ repo. `sqlsc commit` puts database changes into git, and `sqlsc get-latest`
 brings a database up to date with the repo. `sqlsc checkout` tells the team
 you are editing an object and `sqlsc checkin` commits it and lets it go.
 `sqlsc data add` keeps a lookup table's rows in the repo too, and `sqlsc deploy`
-releases a tagged commit to test or prod. An SSMS add-in follows (see the
-[roadmap](#roadmap)).
+releases a tagged commit to test or prod. The [SSMS add-in](ssms/README.md)
+puts the same commands in a window in SQL Server Management Studio.
 
 It is part of the coop suite: a Python CLI installed with pipx like
 `coop-data-doc`, readable for people, and `--json` on every command for
@@ -253,7 +253,7 @@ column type, and releases by tag to a protected target.
 1. **Script and diff**: `init`, `targets`, `status`, `diff`, `script`.
 2. **Commit and get latest**: `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database.
 3. **Checkout and check-in**: a shared lock table, `checkout`, `checkin`, `locks`, `unlock`, and an optional edit guard on SQL Server and Azure SQL.
-4. **Deploy and static data** (this release): `deploy` and `history` for test and prod releases, lookup-table rows as `MERGE` scripts.
-5. **SSMS add-in**: a C# shell over the same CLI.
+4. **Deploy and static data**: `deploy` and `history` for test and prod releases, lookup-table rows as `MERGE` scripts.
+5. **SSMS add-in** (this release): a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).
