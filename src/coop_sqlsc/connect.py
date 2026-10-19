@@ -9,8 +9,11 @@ password is ever in the connection string.
 
 from __future__ import annotations
 
+import os
 import re
 import struct
+import threading
+from collections.abc import Callable
 from typing import Any
 
 from .config import ConfigError, Target, password_for
@@ -84,10 +87,61 @@ def open_connection(target: Target) -> Any:
     elif target.auth == "entra":
         attrs[SQL_COPT_SS_ACCESS_TOKEN] = pack_token(entra_token(target))
     try:
-        conn = pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True)
+        conn = connect_within(
+            lambda: pyodbc.connect(conn_str, attrs_before=attrs or None, autocommit=True), connect_deadline()
+        )
+    except ConnectTimeout as exc:
+        raise ConnectError(
+            f"Could not connect to {target.label} '{target.name}' ({target.server}): it took the connection but "
+            f"did not finish signing in within {exc.seconds} seconds. Try again; if it keeps happening, check "
+            "that the database is running (a paused Fabric capacity or serverless database can take minutes "
+            "to wake), or raise SQLSC_CONNECT_TIMEOUT."
+        ) from exc
     except pyodbc.Error as exc:
         raise ConnectError(_explain(target, exc)) from exc
     return conn
+
+
+class ConnectTimeout(Exception):
+    def __init__(self, seconds: int) -> None:
+        super().__init__(f"no answer within {seconds}s")
+        self.seconds = seconds
+
+
+DEFAULT_CONNECT_DEADLINE = 90
+
+
+def connect_deadline() -> int:
+    """Seconds a connect may take in all, from SQLSC_CONNECT_TIMEOUT (default 90). The
+    driver's own login timeout does not cover every stall: a Fabric endpoint has been
+    seen to accept the TCP connection and never answer the login, for good."""
+    raw = os.environ.get("SQLSC_CONNECT_TIMEOUT", "").strip()
+    try:
+        return max(5, int(raw)) if raw else DEFAULT_CONNECT_DEADLINE
+    except ValueError:
+        return DEFAULT_CONNECT_DEADLINE
+
+
+def connect_within(connect: Callable[[], Any], seconds: int) -> Any:
+    """Runs connect() on a daemon thread and gives up after `seconds`. A connect stuck
+    in the driver cannot be interrupted, but a daemon thread does not keep the process
+    from exiting, so sqlsc still reports the failure and ends."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["conn"] = connect()
+        except BaseException as exc:  # handed back to the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="sqlsc-connect", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise ConnectTimeout(seconds)
+    if "error" in box:
+        raise box["error"]
+    return box["conn"]
 
 
 def entra_token(target: Target) -> str:

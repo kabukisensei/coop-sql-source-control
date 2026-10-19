@@ -334,6 +334,27 @@ def test_token_failures_keep_the_reason_not_the_whole_credential_chain():
     assert "AADSTS700082: The refresh token has expired" in reason and "Traceback" not in reason
 
 
+def test_a_connect_that_never_answers_gives_up_at_the_deadline(monkeypatch):
+    import threading
+    import time
+
+    from coop_sqlsc.connect import ConnectTimeout, connect_deadline, connect_within
+
+    never = threading.Event()
+    start = time.monotonic()
+    with pytest.raises(ConnectTimeout):
+        connect_within(lambda: never.wait(), 1)
+    assert time.monotonic() - start < 5
+    assert connect_within(lambda: "conn", 5) == "conn"
+    with pytest.raises(ValueError):
+        connect_within(lambda: (_ for _ in ()).throw(ValueError("login failed")), 5)
+
+    monkeypatch.setenv("SQLSC_CONNECT_TIMEOUT", "30")
+    assert connect_deadline() == 30
+    monkeypatch.setenv("SQLSC_CONNECT_TIMEOUT", "soon")
+    assert connect_deadline() == 90
+
+
 def test_pooling_is_off_before_pyodbc_creates_its_environment(monkeypatch):
     # pyodbc reads `pooling` once, at its first call (drivers() here); set later, it does
     # nothing, and the driver manager's COM+ context check can hang every connect.
