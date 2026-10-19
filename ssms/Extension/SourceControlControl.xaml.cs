@@ -160,6 +160,14 @@ namespace CoopSqlSourceControl
 
         private async void OnRefresh(object sender, RoutedEventArgs e)
         {
+            // With no usable target (sqlsc.yml was wrong, or sqlsc could not read it),
+            // read the targets again: the file or the tool may have been fixed since.
+            if (Target == null && configPath != null)
+            {
+                await OpenRepoAsync(configPath);
+                return;
+            }
+
             await RefreshAsync();
         }
 

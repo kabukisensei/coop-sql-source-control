@@ -25,17 +25,19 @@ coop-agent and CI always agree.
    use **Find sqlsc…** in the window.
 2. Download `CoopSqlSourceControl.vsix` from the `CoopSqlSourceControl-vsix`
    artifact of the latest CI run on `main`.
-3. Close SSMS, then from an elevated PowerShell:
+3. Close SSMS, then from a normal (not elevated) PowerShell:
    `.\ssms\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix`
    (`-Uninstall` removes it again).
 
 The add-in targets SSMS 21, which runs on the 64-bit Visual Studio 2022 (17.x)
-shell, and SSMS 22, which runs on the Visual Studio 2026 (18.x) shell; the
-manifest accepts both. Microsoft does not support third-party SSMS extensions officially, so
-the install copies the files into SSMS's `Extensions` folder the way SSMS
-add-ins traditionally are installed. The same `.vsix` also installs into Visual
-Studio 2022, which is the easiest place to debug it (F5 opens the experimental
-instance).
+shell, and SSMS 22, which runs on the Visual Studio 2026 (18.x) shell. Both
+register with the Visual Studio installer as their own product
+(`Microsoft.VisualStudio.Product.Ssms`) and ship `VSIXInstaller.exe`, so the
+script installs the add-in for the current user through it, the way a Visual
+Studio extension installs: no admin rights, nothing written under Program
+Files. Microsoft does not support third-party SSMS extensions officially. The
+same `.vsix` also installs into Visual Studio 2022, which is the easiest place
+to debug it (F5 opens the experimental instance).
 
 ## Build
 

@@ -57,6 +57,9 @@ namespace CoopSqlSourceControl.Core
 
         public string TypeText => TypeLabels.For(Type);
 
+        /// <summary>What a screen reader announces for the row (WPF uses ToString).</summary>
+        public override string ToString() => ActionText + " " + TypeText + " " + Object;
+
         public static IList<ChangeInfo> ListFrom(JObject json)
         {
             return TargetInfo.Items(json, "changes").Select(c => new ChangeInfo
@@ -89,6 +92,9 @@ namespace CoopSqlSourceControl.Core
         public string TypeText => TypeLabels.For(Type);
 
         public string LockedAtText => LockedAt.HasValue ? LockedAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : string.Empty;
+
+        /// <summary>What a screen reader announces for the row (WPF uses ToString).</summary>
+        public override string ToString() => Object + " checked out by " + LockedBy;
 
         public static IList<LockInfo> ListFrom(JObject json, string property)
         {
