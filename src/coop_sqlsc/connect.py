@@ -13,6 +13,7 @@ import os
 import re
 import struct
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -154,7 +155,16 @@ def connect_within(connect: Callable[[], Any], seconds: int) -> Any:
     return box["conn"]
 
 
+_tokens: dict[str, Any] = {}
+
+
 def entra_token(target: Target) -> str:
+    """A token for Azure SQL / Fabric, kept for the rest of this run: getting one through
+    `az` takes seconds, and one command often opens two connections (the database and
+    its lock table)."""
+    cached = _tokens.get(target.tenant_id)
+    if cached is not None and cached.expires_on - time.time() > 300:
+        return cached.token
     try:
         from azure.identity import DefaultAzureCredential
     except ImportError as exc:  # pragma: no cover
@@ -171,6 +181,7 @@ def entra_token(target: Target) -> str:
             f"Could not get an Entra ID token for '{target.name}'. Run `az login` "
             f"(add --tenant <id> for another tenant) and try again. Details: {token_reason(exc)}"
         ) from exc
+    _tokens[target.tenant_id] = token
     return token.token
 
 
