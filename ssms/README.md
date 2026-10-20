@@ -30,10 +30,12 @@ coop-agent and CI always agree.
 1. Install the CLI: `pipx install git+https://github.com/kabukisensei/coop-sql-source-control`.
    The add-in finds `sqlsc` on PATH or in `%USERPROFILE%\.local\bin`; otherwise
    use **Find sqlsc…** in the window.
-2. Download `CoopSqlSourceControl.vsix` from the `CoopSqlSourceControl-vsix`
-   artifact of the latest CI run on `main`.
+2. Download `CoopSqlSourceControl.vsix` and `install-ssms.ps1` from the
+   [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)
+   (or, between releases, the `CoopSqlSourceControl-vsix` artifact of the latest
+   CI run on `main`).
 3. Close SSMS, then from a normal (not elevated) PowerShell:
-   `.\ssms\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix`
+   `.\install-ssms.ps1 -Vsix .\CoopSqlSourceControl.vsix`
    (`-Uninstall` removes it again).
 
 The add-in targets SSMS 21, which runs on the 64-bit Visual Studio 2022 (17.x)

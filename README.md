@@ -16,6 +16,14 @@ coop-agent, CI and the SSMS add-in.
 
 ## Install
 
+From a release (the `.whl` on the [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)):
+
+```powershell
+pipx install .\coop_sql_source_control-1.0.0-py3-none-any.whl
+```
+
+or straight from the repo, which needs a GitHub sign-in:
+
 ```powershell
 pipx install git+https://github.com/kabukisensei/coop-sql-source-control
 ```
