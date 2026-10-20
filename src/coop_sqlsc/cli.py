@@ -524,6 +524,7 @@ def run_update(
     the structural changes build on what they did; the "after" ones at the end."""
     only_script = dry_run or output is not None
     who = who or locks.current_user(state.config.root)
+    recorded = False  # a footer run on its own, with no changes (a no-op deploy)
     pending = state.pending_migrations() if not objects else []
     before = migration_steps([m for m in pending if m.when == BEFORE], who, commit)
     after = migration_steps([m for m in pending if m.when != BEFORE], who, commit)
@@ -543,7 +544,7 @@ def run_update(
     plan = build_plan(changes, allow_drops=allow_drops, enforced_keys=state.target.caps["enforced_keys"])
     if not (result and result.failed):
         plan.steps += (before if only_script else []) + after
-    closing = footer(plan) if footer and plan.runnable else []
+    closing = footer(plan) if footer else []  # a deploy records itself even with nothing to change
     structural = [s for s in plan.runnable if s.action != "migrate"]
     if before and only_script and structural:
         header = [
@@ -584,6 +585,20 @@ def run_update(
             raise
         remaining = _filter(compare(after, state.folder, state.sync), objects)
         state.sync.save()
+    elif not only_script and closing and not blocked and not (result and result.failed):
+        # Nothing to change, but a release still goes in the history.
+        try:
+            conn = open_connection(state.target)
+            try:
+                cur = conn.cursor()
+                for statement in closing:
+                    cur.execute(statement)
+            finally:
+                conn.close()
+        except (ConfigError, ConnectError) as exc:
+            fail(opts, "connect", str(exc))
+            raise
+        recorded = True
 
     payload: dict[str, Any] = {
         "command": command,
@@ -596,6 +611,8 @@ def run_update(
         "migrations": [m.to_json() for m in pending],
         "warnings": state.warnings,
     }
+    if footer:
+        payload["recorded"] = recorded or (result is not None and not result.failed and bool(closing))
     if output is not None:
         payload["output"] = str(output)
     if dry_run:
@@ -616,6 +633,8 @@ def run_update(
             console.print("[green]✓[/] Nothing to apply from the repo.")
         else:
             console.print("[green]✓[/] Nothing to do; the database already matches the repo.")
+        if recorded:
+            console.print("[green]✓[/] Recorded the release in sqlsc.Deployment all the same.")
         _print_kept(kept)
         return
     if dry_run:
