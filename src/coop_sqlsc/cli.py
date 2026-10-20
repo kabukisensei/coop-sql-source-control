@@ -28,6 +28,7 @@ from rich.table import Table as RichTable
 from . import __version__, git_ops, locks
 from . import config as config_mod
 from . import data as data_mod
+from . import dependencies as deps_mod
 from . import migrations as migrations_mod
 from .catalog import platform_schemas, read_database
 from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
@@ -413,8 +414,9 @@ def _commit_changes(
     scripts: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
     """Writes the changed object files and commits exactly those, plus the migration
-    scripts named in `scripts` (paths relative to the scripts folder). Returns (short sha, pushed branch)."""
-    if not changes and not scripts:
+    scripts named in `scripts` (paths relative to the scripts folder) and a refreshed
+    Dependencies.json when the repo tracks it. Returns (short sha, pushed branch)."""
+    if not changes and not scripts and not _dependencies_pending(state):
         return None, None
     try:
         root = git_ops.repo_root(state.config.root)
@@ -428,6 +430,10 @@ def _commit_changes(
         else:
             paths.append(_write_from_database(state, change))
     paths += [state.scripts_dir / rel for rel in scripts or []]
+    if state.dependencies is not None:
+        # refreshed with the objects it describes; git skips it when unchanged
+        deps_mod.write(state.scripts_dir, state.dependencies)
+        paths.append(deps_mod.path(state.scripts_dir))
     state.sync.save()
     try:
         sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes, scripts or []))
@@ -1169,6 +1175,9 @@ class State:
     # Migrations/ scripts in the repo, and the ones sqlsc.Migration says the target has run.
     migrations: list[Migration] = field(default_factory=list)
     applied: dict[str, Applied] = field(default_factory=dict)
+    # Dependencies.json as the database would write it now, when the repo tracks it
+    # (see dependencies.py); None when it is not tracked or could not be read.
+    dependencies: str | None = None
 
     def pending_migrations(self) -> list[Migration]:
         if not self.target.caps["tables"]:
@@ -1209,6 +1218,7 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     scripts = migrations_mod.read_folder(cfg.scripts_dir) if files is None else migrations_mod.from_files(files)
     warnings: list[str] = []
     applied: dict[str, Applied] = {}
+    dependencies: str | None = None
     # Files for object types this platform cannot hold are left alone, never
     # reported as deleted (a Lakehouse's tables, a Warehouse's triggers).
     skipped = {t for t, cap in (("table", "tables"), ("trigger", "triggers")) if not target.caps[cap]}
@@ -1230,6 +1240,11 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
                 result.warnings += _read_static_data(
                     conn, target, [k for k in folder if k.type == "data"], result.objects
                 )
+                if files is None and deps_mod.tracked(cfg.scripts_dir):
+                    try:
+                        dependencies = deps_mod.render(deps_mod.read(conn, platform_schemas(target)))
+                    except Exception as exc:  # pyodbc.Error: the platform has no dependency view
+                        warnings.append(f"{deps_mod.FILE} was not refreshed: {_first_error_line(exc)}")
                 if scripts and target.caps["tables"]:
                     try:
                         applied = migrations_mod.read_applied(conn)
@@ -1256,7 +1271,17 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     sync = SyncRecord.load(cfg.root, target.name) if files is None else SyncRecord(None)
     if files is None:
         _ignore_sync_dir(cfg.root)  # repos linked before the sync record existed
-    return State(cfg, target, result.objects, folder, warnings, sync=sync, migrations=scripts, applied=applied)
+    return State(
+        cfg,
+        target,
+        result.objects,
+        folder,
+        warnings,
+        sync=sync,
+        migrations=scripts,
+        applied=applied,
+        dependencies=dependencies,
+    )
 
 
 def _write_from_database(state: State, change: Change) -> Path:
@@ -1367,6 +1392,20 @@ def _read_static_data(
                 "(sqlsc data remove stops tracking it)."
             )
     return warnings
+
+
+def _dependencies_pending(state: State) -> bool:
+    """Whether Dependencies.json is tracked and differs from the database or from HEAD."""
+    if state.dependencies is None:
+        return False
+    path = deps_mod.path(state.scripts_dir)
+    if not path.is_file() or path.read_text(encoding="utf-8") != state.dependencies:
+        return True
+    try:
+        root = git_ops.repo_root(state.config.root)
+        return deps_mod.FILE in git_ops.uncommitted(root, state.scripts_dir)
+    except git_ops.GitError:
+        return False
 
 
 def _uncommitted_migrations(state: State) -> list[str]:
