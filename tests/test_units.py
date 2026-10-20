@@ -902,3 +902,16 @@ def test_a_deploy_with_nothing_to_change_still_records_the_release(tmp_path, fak
     assert any(s.startswith("INSERT INTO sqlsc.Deployment") and ", 0)" in s for s in executed)
     text = run(tmp_path, "deploy", "--ref", "HEAD").output
     assert "Recorded the release in sqlsc.Deployment" in text
+
+
+def test_an_agents_checkout_belongs_to_the_person_it_works_for():
+    from coop_sqlsc.locks import on_behalf, owns
+
+    assert owns("ada@example.com", "ADA@example.com")
+    assert owns("coop-agent:ada@example.com", "ada@example.com")
+    assert on_behalf("coop-agent:ada@example.com", "ada@example.com")
+    assert not on_behalf("ada@example.com", "ada@example.com")
+    # The agent never takes over the person's own checkouts, or another person's agent's.
+    assert not owns("ada@example.com", "coop-agent:ada@example.com")
+    assert not owns("coop-agent:bob@example.com", "ada@example.com")
+    assert not owns("coop-agent:ada@example.com", "coop-agent:bob@example.com")

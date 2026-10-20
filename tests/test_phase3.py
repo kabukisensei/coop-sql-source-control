@@ -136,6 +136,32 @@ def test_checkout_conflicts_status_commit_and_checkin(tmp_path, server, make_db)
 
 
 @pytest.mark.integration
+def test_a_person_checks_in_what_their_agent_checked_out(tmp_path, server, make_db):
+    config = link(tmp_path, server, make_db(SAMPLE.read_text()))
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "alice@example.com")
+    git(tmp_path, "config", "user.name", "Alice")
+    sqlsc(config, "commit", "-m", "Initial script")
+
+    agent = as_user(config, "coop-agent:alice@example.com", "checkout", "sales.vCustomerTotals", "-m", "task 12")
+    assert agent["ok"]
+    assert not as_user(config, "bob@example.com", "checkout", "sales.vCustomerTotals")["ok"]
+    mine = as_user(config, "alice@example.com", "checkout", "sales.Customer")
+    assert not as_user(config, "coop-agent:alice@example.com", "checkout", "sales.Customer")["ok"]
+    assert mine["ok"]
+
+    status = sqlsc(config, "status")
+    assert {lock["object"]: lock["mine"] for lock in status["locks"]} == {
+        "[sales].[vCustomerTotals]": True,
+        "[sales].[Customer]": True,
+    }
+
+    done = sqlsc(config, "checkin", "--no-commit")
+    assert {r["object"] for r in done["released"]} == {"[sales].[vCustomerTotals]", "[sales].[Customer]"}
+    assert sqlsc(config, "locks")["locks"] == []
+
+
+@pytest.mark.integration
 def test_checkout_of_a_new_object_needs_its_type(tmp_path, server, make_db):
     config = link(tmp_path, server, make_db(SAMPLE.read_text()))
     result = CliRunner().invoke(main, ["--json", "--config", str(config), "checkout", "sales.vNotYet"])

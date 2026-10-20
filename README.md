@@ -189,13 +189,17 @@ need `locks: target:`. The `sqlsc` schema is never scripted or compared.
   (`--force` commits them anyway); `checkin` commits only your own.
 - Checking out the same object twice is fine; checking out someone else's fails
   with their name, when they took it and their note, and exits 1.
+- An agent working for you checks out as `<agent>:<you>` (coop-agent uses
+  `--as coop-agent:ada@example.com`). Those checkouts are yours as well: `status`
+  shows them as *you (coop-agent)*, and your `checkin` commits and releases them,
+  so you review the agent's change and check it in. The agent cannot take yours.
 
 **The edit guard** (`sqlsc guard install`) goes further on SQL Server, Azure SQL
 and Fabric SQL database: a database-level DDL trigger rolls back an `ALTER`,
 `DROP` or index change to an object that a different login has checked out, and
 says who has it. It reads the lock table in the same database, so it only works
 when locks are not kept elsewhere, and it tells people apart by database login:
-two people sharing one SQL login are the same person to it. Remove it with
+two people sharing one SQL login are the same person to it. An agent signed in as you (coop-agent with your `az login`) is you to it too. Remove it with
 `sqlsc guard remove`. Note that `get-latest` run by someone else is stopped by
 it too, and rolled back as a whole.
 

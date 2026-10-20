@@ -130,7 +130,7 @@ class LockStore:
             cur = self.conn.cursor()
             for key in keys:
                 current = held.get(key)
-                if current is not None and current.locked_by.lower() != who.lower():
+                if current is not None and not owns(current.locked_by, who):
                     conflicts.append(current)
                     continue
                 if current is None:
@@ -167,7 +167,7 @@ class LockStore:
             for lock in self._locked_for_update(repo):
                 if keys is not None and lock.key not in keys:
                     continue
-                mine = lock.locked_by.lower() == who.lower()
+                mine = owns(lock.locked_by, who)
                 if keys is None and not mine:
                     continue
                 if not mine and not force:
@@ -281,6 +281,23 @@ def key_from_name(object_type: str, name: str) -> ObjectKey:
 
 
 # --- who and which repo -------------------------------------------------------------------
+
+
+def owns(holder: str, who: str) -> bool:
+    """Whether a checkout held by `holder` is `who`'s to check in or release.
+
+    An agent working for someone checks out as `<agent>:<their name>` (coop-agent runs
+    `--as coop-agent:ada@example.com`), so its checkouts belong to that person too: they
+    review the agent's change and check it in. It does not work the other way round: the
+    agent's own name has a colon, so it never takes over the person's checkouts.
+    """
+    h, w = holder.strip().lower(), who.strip().lower()
+    return h == w or (":" not in w and h.endswith(":" + w))
+
+
+def on_behalf(holder: str, who: str) -> bool:
+    """An agent's checkout taken for `who`, as opposed to `who`'s own."""
+    return owns(holder, who) and holder.strip().lower() != who.strip().lower()
 
 
 def current_user(root: Path, override: str | None = None) -> str:
