@@ -168,6 +168,28 @@ namespace CoopSqlSourceControl.Core
         }
     }
 
+    /// <summary>Migration scripts (Migrations/*.sql) as sqlsc reports them.</summary>
+    public static class MigrationInfo
+    {
+        /// <summary>The ids of scripts `status` says this database has not run yet.</summary>
+        public static IList<string> PendingFrom(JObject status)
+        {
+            var block = status?["migrations"] as JObject;
+            return Ids(block, "pending");
+        }
+
+        /// <summary>The ids of scripts a get-latest or deploy answer ran, or would run.</summary>
+        public static IList<string> RanFrom(JObject update)
+        {
+            return Ids(update, "migrations");
+        }
+
+        private static IList<string> Ids(JObject json, string property)
+        {
+            return TargetInfo.Items(json, property).Select(m => m.Value<string>("id")).Where(id => id != null).ToList();
+        }
+    }
+
     public static class OriginLabels
     {
         /// <summary>The "Changed in" column: empty when sqlsc has no sync record for the object.</summary>
