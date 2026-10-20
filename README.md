@@ -148,6 +148,9 @@ both commands treat it the way they always did.
   Ones that read each other are retried until they succeed, so file order never matters.
 - Tables are altered, never rebuilt: columns are added, changed (`ALTER COLUMN`) or, with
   `--allow-drops`, dropped, and constraints and indexes are dropped and added by name. Rows are kept.
+- On SQL Server, Azure SQL and Fabric SQL database, `--allow-drops` refuses to drop an object or
+  column that a view, function, procedure or trigger still uses, naming them, unless the same update
+  drops those too. Change or drop them first, or do it in a migration script.
 - Changes `ALTER` cannot make safely (a new `IDENTITY`, a changed computed column, removing a
   constraint SQL Server named itself) are listed as held back, with the reason; everything else runs.
 - On SQL Server, Azure SQL and Fabric SQL database the whole update is one transaction: if any
