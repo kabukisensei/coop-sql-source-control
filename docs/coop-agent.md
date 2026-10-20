@@ -36,14 +36,18 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
    `coop-sqlsc --json <status|diff> [--target <env>] [objects…]` and renders
    the changes into the tool's `content` (object, action, and for `diff` the
    unified diff, within the 12,000-character cap).
-3. Treat `script` and `commit` as writes and `get-latest` as a database change:
+3. Treat `script` as a write, `commit` and `checkin` as source commits (which coop
+   leaves to a person), and `get-latest` as a database change:
    under coop's guardrails each runs only after the user approves, and the agent
    shows `get-latest --dry-run` before running it.
 4. Before the agent edits an object it runs
    `coop-sqlsc --json checkout <object> --as coop-agent:<user> -m "<task>"`, and
-   stops to tell the user if `conflicts` is not empty. When the work is approved
-   it runs `checkin <object>` so the lock is released with the commit. Naming
-   the agent in `--as` keeps its checkouts apart from the person's own.
+   stops to tell the user if `conflicts` is not empty. coop never commits source,
+   so it does not run `commit` or `checkin`: the person reviews the change and
+   checks it in themselves (from the SSMS add-in or `sqlsc checkin`), because a
+   checkout held by `coop-agent:<user>` counts as that user's own (`mine` is true
+   for them). Naming the agent in `--as` keeps it from taking the person's own
+   checkouts, and keeps its checkouts apart from everyone else's.
 
 ## Example
 

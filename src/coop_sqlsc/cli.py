@@ -1120,8 +1120,13 @@ def _target(opts: Opts, cfg: config_mod.Config, name: str | None) -> config_mod.
         raise
 
 
-def _same_user(a: str, b: str) -> bool:
-    return a.strip().lower() == b.strip().lower()
+def _same_user(holder: str, who: str) -> bool:
+    return locks.owns(holder, who)
+
+
+def _you(holder: str, who: str) -> str:
+    """How a checkout of yours reads: "you", or "you (coop-agent)" for one an agent took for you."""
+    return f"you ({holder.split(':', 1)[0]})" if locks.on_behalf(holder, who) else "you"
 
 
 def _owner(held: dict[ObjectKey, Lock], key: ObjectKey) -> str | None:
@@ -1439,7 +1444,11 @@ def _print_changes(changes: list[Change], held: dict[ObjectKey, Lock] | None = N
             cells.append(
                 ""
                 if lock is None
-                else ("[green]you[/]" if _same_user(lock.locked_by, who) else f"[red]{escape(lock.locked_by)}[/]")
+                else (
+                    f"[green]{escape(_you(lock.locked_by, who))}[/]"
+                    if _same_user(lock.locked_by, who)
+                    else f"[red]{escape(lock.locked_by)}[/]"
+                )
             )
         table.add_row(*cells)
     console.print(table)
