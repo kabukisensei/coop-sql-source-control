@@ -66,6 +66,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc guard install\|remove\|status` | The optional edit guard (see below) |
 | `sqlsc data add tables…` | Starts keeping these tables' rows in the repo as static data |
 | `sqlsc data remove tables…` | Stops keeping them (the rows stay in the database) |
+| `sqlsc dependencies` | Writes the database's own dependency list to `Dependencies.json` for lineage tools (see *Lineage*); `commit` and `checkin` keep it current after that |
 | `sqlsc deploy` | Releases a commit (`--ref`, default `HEAD`) to a database; `--output FILE` writes the script for review, `--confirm NAME` is needed for a protected target |
 | `sqlsc history` | Lists the releases `deploy` has made to a database |
 | `sqlsc migrations` | Lists the hand-written migration scripts and which a database has run (see *Migration scripts*); `migrations add NAME` starts a new one |
@@ -305,6 +306,7 @@ database/
   Stored Procedures/sales.usp_GetCustomer.sql
   Triggers/sales.trCustomer_Touch.sql
   Data/sales.Status.sql
+  Dependencies.json        (optional, see Lineage)
 ```
 
 Scripts are deterministic: the same object always produces the same bytes, names
@@ -313,6 +315,24 @@ layout, and constraint names SQL Server generated itself (`PK__Tag__3214EC07…`
 are left out because they differ in every database. Views, procedures, functions
 and triggers are stored exactly as written, with line endings and trailing
 spaces normalized.
+
+## Lineage
+
+The repo is enough for coop-data-doc to map lineage: point its `sql` repo at
+the scripts folder and it reads the views, procedures, functions and triggers
+(`Data/`, `Migrations/` and `Security/` hold no lineage; exclude them). Its
+parse can still miss a reference, for example in a statement it cannot read or
+a call to a scalar function.
+
+`sqlsc dependencies` writes `Dependencies.json` next to the object folders:
+what each view, procedure, function and trigger references, as the database
+records it in `sys.sql_expression_dependencies`. Commit it once, and every
+`commit` and `checkin` refreshes it with the objects it describes. Name the file
+in coop-data-doc's `catalog_dependencies` setting and it warns about each
+reference its parse did not find. The list says that an object references
+another, not whether it reads or writes it, so it checks lineage rather than
+adding to it. Neither side sees inside dynamic SQL. SQL Server, Azure SQL and Fabric SQL database have the view;
+on a target without it the command says so and commit leaves the file alone.
 
 ## Use from coop-agent
 

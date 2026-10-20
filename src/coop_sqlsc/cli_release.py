@@ -1,4 +1,5 @@
-"""Static data, release deploys and deployment history: `sqlsc data`, `sqlsc deploy`, `sqlsc history`."""
+"""Static data, the dependency list, release deploys and deployment history:
+`sqlsc data`, `sqlsc dependencies`, `sqlsc deploy`, `sqlsc history`."""
 
 from __future__ import annotations
 
@@ -14,7 +15,9 @@ from rich.table import Table as RichTable
 
 from . import __version__, git_ops, locks
 from . import data as data_mod
+from . import dependencies as deps_mod
 from . import migrations as migrations_mod
+from .catalog import platform_schemas
 from .cli import (
     AS_OPTION,
     Opts,
@@ -95,6 +98,54 @@ def data_add(opts: Opts, tables: tuple[str, ...], target_name: str | None) -> No
         if item["rows"] > data_mod.LARGE_TABLE:
             console.print("  [yellow]![/] That is a lot of rows for static data; it suits small lookup tables.")
     console.print("Commit the file(s) with [bold]sqlsc commit[/] or git.")
+
+
+@main.command()
+@click.option("--target", "-t", "target_name", help="Database to read (default from sqlsc.yml).")
+@click.pass_obj
+def dependencies(opts: Opts, target_name: str | None) -> None:
+    """Write the database's own dependency list to Dependencies.json, for lineage tools.
+
+    \b
+    What each view, procedure, function and trigger references, as
+    sys.sql_expression_dependencies records it. coop-data-doc checks its lineage
+    against it. Once the file is in the repo, commit and checkin keep it current.
+    """
+    cfg = _load_config(opts)
+    target = _target(opts, cfg, target_name)
+    try:
+        conn = open_connection(target)
+    except (ConfigError, ConnectError) as exc:
+        fail(opts, "connect", str(exc))
+        raise
+    try:
+        found = deps_mod.read(conn, platform_schemas(target))
+    except Exception as exc:  # pyodbc.Error: no sys.sql_expression_dependencies here
+        fail(
+            opts,
+            "unsupported",
+            f"{target.label} '{target.name}' did not list its dependencies: {_first_error_line(exc)}",
+        )
+        raise
+    finally:
+        conn.close()
+    changed = deps_mod.write(cfg.scripts_dir, deps_mod.render(found))
+    path = deps_mod.path(cfg.scripts_dir)
+    emit(
+        opts,
+        {
+            "command": "dependencies",
+            "target": target.summary(),
+            "path": str(path),
+            "changed": changed,
+            "dependencies": len(found),
+        },
+    )
+    if opts.as_json:
+        return
+    word = "Wrote" if changed else "Already current:"
+    console.print(f"[green]✓[/] {word} {len(found)} dependencies in {escape(str(path))}")
+    console.print("Commit it with [bold]sqlsc commit[/] or git; commit and checkin keep it current from now on.")
 
 
 @data.command("remove")
