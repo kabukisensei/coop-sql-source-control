@@ -23,6 +23,7 @@ needing a hand-written migration and left out; everything else still runs.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -197,19 +198,44 @@ def _still_used_guard(key: ObjectKey, column: str | None, dropping: list[ObjectK
     obj = qualified(key.schema, key.name)
     what = obj + (f".{quote(column)}" if column else "")
     where = f"d.referenced_id = OBJECT_ID({lit(obj)})"
-    if column:
-        where += f" AND d.referenced_minor_id = COLUMNPROPERTY(d.referenced_id, {lit(column)}, 'ColumnId')"
-    else:
-        where += " AND d.referenced_minor_id = 0"
     others = [lit(qualified(k.schema, k.name)) for k in dropping if k != key]
     if others:
         where += " AND d.referencing_id NOT IN (" + ", ".join(f"OBJECT_ID({o})" for o in others) + ")"
     message = what + " is still used by %s. Change or drop those first, or do it in a migration script."
+    if column:
+        return _column_used_guard(obj, column, where, lit, message)
+    where += " AND d.referenced_minor_id = 0"
     return (
         "DECLARE @users nvarchar(max) = (SELECT STRING_AGG(QUOTENAME(OBJECT_SCHEMA_NAME(u.referencing_id)) "
         "+ '.' + QUOTENAME(OBJECT_NAME(u.referencing_id)), ', ') "
         f"FROM (SELECT DISTINCT d.referencing_id FROM sys.sql_expression_dependencies AS d WHERE {where}) AS u);\n"
         f"IF @users IS NOT NULL RAISERROR ({lit(message)}, 16, 1, @users)"
+    )
+
+
+def _column_used_guard(obj: str, column: str, where: str, lit: Callable[[str], str], message: str) -> str:
+    """The column case of _still_used_guard. sys.sql_expression_dependencies names the
+    column (referenced_minor_id) only for schema-bound objects; an ordinary view, procedure,
+    function or trigger is recorded against the table as a whole (minor id 0), so each object
+    that reads the table is asked through sys.dm_sql_referenced_entities, which resolves its
+    columns. An object that no longer binds (already broken) cannot be asked and is skipped."""
+    table = f"OBJECT_ID({lit(obj)})"
+    return (
+        "DECLARE @users nvarchar(max) = N'', @id int, @name nvarchar(600);\n"
+        "DECLARE sqlsc_users CURSOR LOCAL FAST_FORWARD FOR "
+        f"SELECT DISTINCT d.referencing_id FROM sys.sql_expression_dependencies AS d WHERE {where};\n"
+        "OPEN sqlsc_users;\nFETCH NEXT FROM sqlsc_users INTO @id;\nWHILE @@FETCH_STATUS = 0\nBEGIN\n"
+        "    SET @name = QUOTENAME(OBJECT_SCHEMA_NAME(@id)) + N'.' + QUOTENAME(OBJECT_NAME(@id));\n"
+        "    BEGIN TRY\n"
+        "        IF EXISTS (SELECT 1 FROM sys.sql_expression_dependencies AS d WHERE d.referencing_id = @id "
+        f"AND d.referenced_id = {table} "
+        f"AND d.referenced_minor_id = COLUMNPROPERTY({table}, {lit(column)}, 'ColumnId'))\n"
+        "        OR EXISTS (SELECT 1 FROM sys.dm_sql_referenced_entities(@name, N'OBJECT') AS r "
+        f"WHERE r.referenced_id = {table} AND r.referenced_minor_name = {lit(column)})\n"
+        "            SET @users = @users + CASE WHEN @users = N'' THEN N'' ELSE N', ' END + @name;\n"
+        "    END TRY\n    BEGIN CATCH\n    END CATCH;\n"
+        "    FETCH NEXT FROM sqlsc_users INTO @id;\nEND;\nCLOSE sqlsc_users;\nDEALLOCATE sqlsc_users;\n"
+        f"IF @users <> N'' RAISERROR ({lit(message)}, 16, 1, @users)"
     )
 
 

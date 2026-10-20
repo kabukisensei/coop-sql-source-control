@@ -575,8 +575,11 @@ def test_allow_drops_refuses_what_other_objects_still_use():
     assert "dbo.p is still used by %s" in guard
     assert by_key[gone].statements[-1] == "DROP PROCEDURE dbo.p"
     assert by_key[gone].notes == ["refused if a view, function, procedure or trigger still uses it"]
-    column = [s for s in by_key[t].statements if "COLUMNPROPERTY(d.referenced_id, N'Old', 'ColumnId')" in s]
-    assert len(column) == 1 and "dbo.T.Old is still used by %s" in column[0]
+    column = [s for s in by_key[t].statements if "dbo.T.Old is still used by %s" in s]
+    assert len(column) == 1 and "COLUMNPROPERTY(OBJECT_ID(N'dbo.T'), N'Old', 'ColumnId')" in column[0]
+    # A plain (not schema-bound) view is recorded against the table only: ask it about its columns.
+    assert "sys.dm_sql_referenced_entities(@name, N'OBJECT')" in column[0]
+    assert "r.referenced_minor_name = N'Old'" in column[0]
     assert by_key[t].statements.index(column[0]) < by_key[t].statements.index("ALTER TABLE dbo.T DROP COLUMN Old")
     assert "column Old is dropped unless a view, function, procedure or trigger still uses it" in by_key[t].notes
     # Fabric Warehouse has no sys.sql_expression_dependencies: no guard there.
