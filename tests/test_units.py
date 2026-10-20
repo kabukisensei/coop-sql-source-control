@@ -664,6 +664,23 @@ def _fake_migration_store(monkeypatch, applied: dict):
     monkeypatch.setattr(mig, "read_applied", lambda conn: dict(applied))
 
 
+def test_status_text_lists_changes_and_pending_migrations_together(tmp_path, fake_db, monkeypatch):
+    # Found live: with a migration pending, text status hid the object changes, and with
+    # nothing to report it printed "matches" and then an empty "0 new, 0 changed" table.
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    _fake_migration_store(monkeypatch, {})
+    quiet = run(tmp_path, "status").output
+    assert "The repo matches" in quiet and "0 new" not in quiet
+
+    folder = tmp_path / "database"
+    (folder / "Views").mkdir(parents=True)
+    (folder / "Views" / "dbo.vSales.sql").write_text("CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n")
+    (folder / "Migrations").mkdir()
+    (folder / "Migrations" / "001_backfill.sql").write_text("UPDATE dbo.t SET x = 1;\n")
+    both = run(tmp_path, "status").output
+    assert "dbo" in both and "vSales" in both and "1 migration script(s) have not run" in both
+
+
 def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_path, fake_db, monkeypatch):
     run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
     folder = tmp_path / "database"

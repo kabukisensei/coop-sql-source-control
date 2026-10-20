@@ -235,11 +235,6 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
         _print_header(state)
         if not changes:
             console.print(f"[green]✓[/] The repo matches the database ({len(state.db)} objects).")
-        if pending:
-            console.print(
-                f"{len(pending)} migration script(s) have not run on '{escape(state.target.name)}' yet; "
-                "[bold]sqlsc get-latest[/] runs them."
-            )
         else:
             _print_changes(changes, held, who)
             console.print()
@@ -247,6 +242,11 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
                 f"{counts[NEW]} new, {counts[CHANGED]} changed, {counts[DELETED]} deleted: " + _sides_text(sides)
             )
             console.print("Run [bold]sqlsc diff <object>[/] to see one.")
+        if pending:
+            console.print(
+                f"{len(pending)} migration script(s) have not run on '{escape(state.target.name)}' yet; "
+                "[bold]sqlsc get-latest[/] runs them."
+            )
         mine = [lock for lock in held.values() if _same_user(lock.locked_by, who)]
         if mine:
             console.print(
