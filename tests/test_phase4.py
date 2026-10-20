@@ -77,7 +77,12 @@ def test_static_data_tracks_commits_and_rebuilds(tmp_path, server, make_db):
     added = sqlsc(config, "data", "add", "sales.Status", "Reason")
     assert {(t["object"], t["rows"]) for t in added["tracked"]} == {("[sales].[Status]", 2), ("[sales].[Reason]", 3)}
     assert (tmp_path / "database" / "Data" / "sales.Status.sql").is_file()
-    assert sqlsc(config, "status")["changes"] == []  # the files match the rows
+    # The files match the rows but are not committed yet, so status still lists them.
+    waiting = sqlsc(config, "status")["changes"]
+    assert {(c["type"], c["object"], c["action"]) for c in waiting} == {
+        ("data", "[sales].[Reason]", "new"),
+        ("data", "[sales].[Status]", "new"),
+    }
     sqlsc(config, "commit", "-m", "Track lookups")
     assert sqlsc(config, "status")["changes"] == []
 
