@@ -197,9 +197,11 @@ namespace CoopSqlSourceControl
             ChangesGrid.ItemsSource = changes;
             LocksGrid.ItemsSource = LockInfo.ListFrom(result.Json, "locks");
             var warnings = Warnings(result.Json);
+            var pending = MigrationInfo.PendingFrom(result.Json);
             Say((changes.Count == 0
                     ? "The repo matches " + target.Name + "."
                     : changes.Count + " object(s) differ between " + target.Name + " and the repo" + Sides(changes) + ".")
+                + (pending.Count > 0 ? " " + pending.Count + " migration script(s) have not run on " + target.Name + " yet; Get latest runs them." : string.Empty)
                 + (warnings.Length > 0 ? " " + warnings : string.Empty));
         }
 
@@ -370,8 +372,10 @@ namespace CoopSqlSourceControl
                 return;
             }
 
+            var scripts = MigrationInfo.RanFrom(plan.Json);
             Say("Review the script in Output, then answer the question.");
-            if (!Confirm("Run this script against " + target.Name + " (" + target.Database + ")? It makes " + steps + " change(s)."))
+            if (!Confirm("Run this script against " + target.Name + " (" + target.Database + ")? It makes " + steps + " change(s)"
+                + (scripts.Count > 0 ? ", including " + scripts.Count + " migration script(s): " + string.Join(", ", scripts) : string.Empty) + "."))
             {
                 Say("Get latest was not run; the script is in Output.");
                 return;

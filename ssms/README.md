@@ -17,7 +17,9 @@ coop-agent and CI always agree.
   keep a selected lookup table's rows in the repo as static data. With nothing
   selected, Commit and Get latest act on everything, after asking. Commit
   reports what it held back because the repo moved, and Get latest what it
-  kept because the database did.
+  kept because the database did. When the repo has migration scripts the
+  database has not run, the status line says so and Get latest's question
+  names them.
 - **Checkouts**: everything checked out in this repo. **Check in** commits and
   releases, **Undo checkout** releases without committing, and **Release…**
   takes someone else's checkout away (`sqlsc unlock --force`).

@@ -259,6 +259,22 @@ objects. A script that is edited after a database has run it does not run
 there again; `sqlsc migrations` marks it *edited*, so put the further change
 in a new script.
 
+Renames are a migration too. Without one, renaming `dbo.Customer` to
+`dbo.Client` reads as a new table and a deleted one, and `get-latest` would
+create an empty `Client` (and drop `Customer` only with `--allow-drops`, rows
+and all). Instead, rename the file as well as the table, and add a *before*
+script that renames whichever name a database still has:
+
+```sql
+-- sqlsc: before
+IF OBJECT_ID('dbo.Customer') IS NOT NULL AND OBJECT_ID('dbo.Client') IS NULL
+    EXEC sp_rename 'dbo.Customer', 'Client';
+```
+
+The script runs first, the database is read again, and the compare then sees
+`Client` on both sides with its rows intact. The same shape works for a column
+(`sp_rename 'dbo.Client.Name', 'FullName', 'COLUMN'`).
+
 ## Repo layout
 
 ```
