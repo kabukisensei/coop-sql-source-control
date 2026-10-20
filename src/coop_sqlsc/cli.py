@@ -15,6 +15,7 @@ import sys
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,13 +28,15 @@ from rich.table import Table as RichTable
 from . import __version__, git_ops, locks
 from . import config as config_mod
 from . import data as data_mod
+from . import migrations as migrations_mod
 from .catalog import platform_schemas, read_database
 from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
-from .deploy import Plan, apply, build_plan
+from .deploy import Plan, apply, build_plan, migration_steps
 from .layout import delete_object, key_for_path, objects_from_files, read_folder, relative_path, write_object
 from .locks import Lock, LockError, LockStore
+from .migrations import BEFORE, Applied, Migration
 from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
 from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
 
@@ -203,6 +206,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
     counts = summarize(changes)
     sides = _sides(changes)
     held, who = _peek_locks(state, as_user)
+    pending = state.pending_migrations()
     emit(
         opts,
         {
@@ -220,6 +224,10 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
                 for c in changes
             ],
             "locks": [{**lock.to_json(), "mine": _same_user(lock.locked_by, who)} for lock in held.values()],
+            "migrations": {
+                "pending": [m.to_json() for m in pending],
+                "edited": [m.to_json() for m in migrations_mod.edited(state.migrations, state.applied)],
+            },
             "warnings": state.warnings,
         },
     )
@@ -227,6 +235,11 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
         _print_header(state)
         if not changes:
             console.print(f"[green]✓[/] The repo matches the database ({len(state.db)} objects).")
+        if pending:
+            console.print(
+                f"{len(pending)} migration script(s) have not run on '{escape(state.target.name)}' yet; "
+                "[bold]sqlsc get-latest[/] runs them."
+            )
         else:
             _print_changes(changes, held, who)
             console.print()
@@ -240,7 +253,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
                 f"You have {len(mine)} object(s) checked out; [bold]sqlsc checkin[/] commits and releases them."
             )
         _print_warnings(state.warnings)
-    if exit_code and changes:
+    if exit_code and (changes or pending):
         sys.exit(1)
 
 
@@ -347,11 +360,13 @@ def commit(
         skipped = [c for c in changes if c.key in held and not _same_user(held[c.key].locked_by, who)]
         held_back = [c for c in changes if c not in skipped and not c.from_database]
         changes = [c for c in changes if c not in skipped and c not in held_back]
-    sha, branch = _commit_changes(opts, state, changes, message, push)
+    scripts = _uncommitted_migrations(state)
+    sha, branch = _commit_changes(opts, state, changes, message, push, scripts)
     emit(
         opts,
         {
             "command": "commit",
+            "migrations": scripts,
             **state.header(),
             "commit": sha,
             "pushed": branch,
@@ -371,8 +386,9 @@ def commit(
     else:
         _print_changes(changes)
         console.print()
+        scripted = f" and {len(scripts)} migration script(s)" if scripts else ""
         console.print(
-            f"[green]✓[/] Committed {len(changes)} object(s) as [bold]{sha}[/]"
+            f"[green]✓[/] Committed {len(changes)} object(s){scripted} as [bold]{sha}[/]"
             + (f" and pushed {escape(branch)}." if branch else ".")
         )
     for change in skipped:
@@ -386,10 +402,16 @@ def commit(
 
 
 def _commit_changes(
-    opts: Opts, state: State, changes: list[Change], message: str | None, push: bool
+    opts: Opts,
+    state: State,
+    changes: list[Change],
+    message: str | None,
+    push: bool,
+    scripts: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
-    """Writes the changed object files and commits exactly those. Returns (short sha, pushed branch)."""
-    if not changes:
+    """Writes the changed object files and commits exactly those, plus the migration
+    scripts named in `scripts` (paths relative to the scripts folder). Returns (short sha, pushed branch)."""
+    if not changes and not scripts:
         return None, None
     try:
         root = git_ops.repo_root(state.config.root)
@@ -402,9 +424,10 @@ def _commit_changes(
             paths.append(state.scripts_dir / relative_path(change.key))  # already right on disk; commit as it is
         else:
             paths.append(_write_from_database(state, change))
+    paths += [state.scripts_dir / rel for rel in scripts or []]
     state.sync.save()
     try:
-        sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes))
+        sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes, scripts or []))
     except git_ops.GitError as exc:
         fail(opts, "git", str(exc))
         raise
@@ -489,25 +512,51 @@ def run_update(
     header: list[str] | None = None,
     footer: Callable[[Plan], list[str]] | None = None,
     extra: dict[str, Any] | None = None,
+    who: str | None = None,
+    commit: str | None = None,
 ) -> None:
     """Plans, writes and (unless only a script was asked for) runs the changes that
     make state.target match state.folder. Shared by get-latest and deploy. Without
-    `force`, objects the database changed since the last sync are kept as they are."""
+    `force`, objects the database changed since the last sync are kept as they are.
+
+    Migration scripts the target has not run yet go with a whole update (no object
+    names given): the "before" ones first, after which the database is read again so
+    the structural changes build on what they did; the "after" ones at the end."""
+    only_script = dry_run or output is not None
+    who = who or locks.current_user(state.config.root)
+    pending = state.pending_migrations() if not objects else []
+    before = migration_steps([m for m in pending if m.when == BEFORE], who, commit)
+    after = migration_steps([m for m in pending if m.when != BEFORE], who, commit)
+    if blocked:
+        preview = build_plan(_filter(state.changes(), objects), allow_drops=allow_drops)
+        if before or after or preview.runnable:
+            fail(opts, "protected", blocked)
+
+    result = None
+    if before and not only_script:
+        result = _run_before_migrations(opts, state, Plan(before))
+        if result.failed:
+            before = []  # nothing else ran; report the failure below
     changes = _filter(state.changes(), objects)
     kept: list[Change] = [] if force else [c for c in changes if not c.from_repo]
     changes = [c for c in changes if c not in kept]
     plan = build_plan(changes, allow_drops=allow_drops, enforced_keys=state.target.caps["enforced_keys"])
+    if not (result and result.failed):
+        plan.steps += (before if only_script else []) + after
     closing = footer(plan) if footer and plan.runnable else []
+    if before and only_script:
+        header = [
+            *(header or plan.script(state.target).splitlines()[:2]),
+            f"-- {len(before)} migration script(s) run first. The structural changes below were worked out",
+            "-- before they ran; if a script changes structure too, run the update with sqlsc instead,",
+            "-- which reads the database again in between.",
+        ]
     script_text = plan.script(state.target, header, closing)
-    only_script = dry_run or output is not None
-    if blocked and plan.runnable:
-        fail(opts, "protected", blocked)
     if output is not None:
         output.write_text(script_text, encoding="utf-8")
 
-    result = None
     remaining: list[Change] = []
-    if not only_script and plan.runnable:
+    if not only_script and plan.runnable and not (result and result.failed):
         spinner = (
             nullcontext()
             if opts.as_json
@@ -517,7 +566,9 @@ def run_update(
             with spinner:
                 conn = open_connection(state.target)
                 try:
+                    done_before = result.done if result else []
                     result = apply(conn, plan, state.target)
+                    result.done = done_before + result.done
                     if closing and not result.failed:
                         cur = conn.cursor()
                         for statement in closing:
@@ -538,9 +589,10 @@ def run_update(
         **state.header(),
         **(extra or {}),
         "applied": result is not None and not result.failed,
-        "steps": [s.to_json() for s in plan.steps],
+        "steps": [s.to_json() for s in (before if not only_script else []) + plan.steps],
         "held_back": [s.to_json() for s in plan.held_back],
         "kept": [{**c.to_json(), "reason": _keep_reason(c)} for c in kept],
+        "migrations": [m.to_json() for m in pending],
         "warnings": state.warnings,
     }
     if output is not None:
@@ -558,14 +610,17 @@ def run_update(
         return
 
     _print_header(state)
-    if not plan.steps:
+    if not plan.steps and not before:
         console.print("[green]✓[/] Nothing to do; the database already matches the repo.")
         _print_kept(kept)
         return
     if dry_run:
         console.print(Syntax(script_text, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
-    for step in sorted(plan.steps, key=lambda s: (s.phase, s.key.sort_key)):
-        style = {"create": "green", "alter": "yellow", "data": "cyan", "drop": "red"}.get(step.action, "dim")
+    shown = (before if not only_script else []) + plan.steps
+    for step in sorted(shown, key=lambda s: (s.phase, s.key.sort_key)):
+        style = {"create": "green", "alter": "yellow", "data": "cyan", "drop": "red", "migrate": "magenta"}.get(
+            step.action, "dim"
+        )
         console.print(
             f"  [{style}]{step.action:>7}[/]  {TYPE_LABELS[step.key.type]} {escape(step.key.display)}"
             + (f"  [dim]{escape('; '.join(step.notes))}[/]" if step.notes else "")
@@ -590,15 +645,44 @@ def run_update(
     _print_warnings(state.warnings)
 
 
+def _run_before_migrations(opts: Opts, state: State, plan: Plan):
+    """Runs the "before" migration scripts on their own, then reads the database again
+    so the structural changes are planned against what they left behind."""
+    spinner = (
+        nullcontext()
+        if opts.as_json
+        else err_console.status(f"Running {len(plan.steps)} migration script(s) on '{state.target.name}'…")
+    )
+    try:
+        with spinner:
+            conn = open_connection(state.target)
+            try:
+                result = apply(conn, plan, state.target)
+                if not result.failed:
+                    state.db = read_database(conn, state.target).objects
+                    _read_static_data(conn, state.target, [k for k in state.folder if k.type == "data"], state.db)
+                    for key in result.done:
+                        state.applied[key.name] = Applied(key.name, datetime.now(timezone.utc), "", "")
+            finally:
+                conn.close()
+    except (ConfigError, ConnectError) as exc:
+        fail(opts, "connect", str(exc))
+        raise
+    return result
+
+
 def _print_kept(kept: list[Change]) -> None:
     for change in kept:
         console.print(f"[yellow]![/] Kept {escape(change.key.display)}: {escape(_keep_reason(change))}")
 
 
-def _default_message(state: State, changes: list[Change]) -> str:
+def _default_message(state: State, changes: list[Change], scripts: list[str] | None = None) -> str:
     names = ", ".join(c.key.display for c in changes[:5])
     more = f" and {len(changes) - 5} more" if len(changes) > 5 else ""
-    return f"Update {len(changes)} object(s) from {state.target.name}: {names}{more}"
+    if not changes:
+        return f"Add {len(scripts or [])} migration script(s): " + ", ".join(scripts or [])
+    scripted = f" and {len(scripts)} migration script(s)" if scripts else ""
+    return f"Update {len(changes)} object(s){scripted} from {state.target.name}: {names}{more}"
 
 
 # --- checkout / checkin / locks / unlock / guard ------------------------------------
@@ -1037,6 +1121,14 @@ class State:
     push_error: str | None = None
     # What this working copy and the target last agreed on (see sync.py).
     sync: SyncRecord = field(default_factory=lambda: SyncRecord(None))
+    # Migrations/ scripts in the repo, and the ones sqlsc.Migration says the target has run.
+    migrations: list[Migration] = field(default_factory=list)
+    applied: dict[str, Applied] = field(default_factory=dict)
+
+    def pending_migrations(self) -> list[Migration]:
+        if not self.target.caps["tables"]:
+            return []  # nowhere to record them (a Lakehouse); the warning is on state
+        return migrations_mod.pending(self.migrations, self.applied)
 
     @property
     def scripts_dir(self) -> Path:
@@ -1069,7 +1161,9 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         fail(opts, "config", str(exc))
         raise
     folder, unknown = read_folder(cfg.scripts_dir) if files is None else objects_from_files(files)
+    scripts = migrations_mod.read_folder(cfg.scripts_dir) if files is None else migrations_mod.from_files(files)
     warnings: list[str] = []
+    applied: dict[str, Applied] = {}
     # Files for object types this platform cannot hold are left alone, never
     # reported as deleted (a Lakehouse's tables, a Warehouse's triggers).
     skipped = {t for t, cap in (("table", "tables"), ("trigger", "triggers")) if not target.caps[cap]}
@@ -1091,6 +1185,13 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
                 result.warnings += _read_static_data(
                     conn, target, [k for k in folder if k.type == "data"], result.objects
                 )
+                if scripts and target.caps["tables"]:
+                    try:
+                        applied = migrations_mod.read_applied(conn)
+                    except Exception as exc:  # pyodbc.Error: say so, and treat every script as pending
+                        warnings.append(f"sqlsc.Migration could not be read: {_first_error_line(exc)}")
+                elif scripts:
+                    warnings.append(f"Migration scripts are skipped: {target.label} cannot hold sqlsc.Migration.")
             finally:
                 conn.close()
     except ConfigError as exc:
@@ -1108,7 +1209,7 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     ]
     # A deploy reads the repo at a commit, not this working copy: no sync record applies.
     sync = SyncRecord.load(cfg.root, target.name) if files is None else SyncRecord(None)
-    return State(cfg, target, result.objects, folder, warnings, sync=sync)
+    return State(cfg, target, result.objects, folder, warnings, sync=sync, migrations=scripts, applied=applied)
 
 
 def _write_from_database(state: State, change: Change) -> Path:
@@ -1221,6 +1322,17 @@ def _read_static_data(
     return warnings
 
 
+def _uncommitted_migrations(state: State) -> list[str]:
+    """Migrations/ files that are new, edited or deleted since HEAD: commit takes them along."""
+    try:
+        root = git_ops.repo_root(state.config.root)
+        dirty = git_ops.uncommitted(root, state.scripts_dir)
+    except git_ops.GitError:
+        return []
+    prefix = migrations_mod.FOLDER.lower() + "/"
+    return sorted(rel for rel in dirty if rel.lower().startswith(prefix) and rel.lower().endswith(".sql"))
+
+
 def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
     """Object files that already match the database but are not committed yet: written
     by `script` or `data add`, or edited and applied with get-latest. The database shows
@@ -1296,7 +1408,7 @@ def _print_warnings(warnings: list[str]) -> None:
         err_console.print(f"[yellow]![/] {escape(warning)}")
 
 
-from . import cli_release  # noqa: E402,F401  (registers data, deploy and history)
+from . import cli_release  # noqa: E402,F401  (registers data, deploy, history and migrations)
 
 if __name__ == "__main__":  # pragma: no cover
     main()

@@ -626,3 +626,99 @@ def test_status_says_who_you_are_and_which_checkouts_are_yours(tmp_path, fake_db
 
     theirs = json.loads(run(tmp_path, "--json", "status", "--as", "bob@example.com").output)
     assert theirs["changes"][0]["mine"] is False and theirs["locks"][0]["mine"] is False
+
+
+# --- migration scripts -----------------------------------------------------------------------
+
+
+def test_migration_files_know_when_they_run_and_when_they_were_edited(tmp_path):
+    from datetime import datetime
+
+    from coop_sqlsc import migrations as mig
+
+    files = {
+        "Migrations/002_after.sql": "UPDATE t SET x = 1;\nGO\n",
+        "Migrations/001_before.sql": "-- sqlsc: before\nALTER TABLE t ADD y int NULL;\nGO\nUPDATE t SET y = 0;\n",
+        "Migrations/notes.txt": "ignored",
+        "Tables/dbo.t.sql": "CREATE TABLE dbo.t (x int);",
+    }
+    found = mig.from_files(files)
+    assert [(m.id, m.when) for m in found] == [("001_before", "before"), ("002_after", "after")]
+    assert mig.statements(found[0]) == ["ALTER TABLE t ADD y int NULL;", "UPDATE t SET y = 0;"]
+    applied = {"001_before": mig.Applied("001_before", datetime(2026, 1, 1), "ada", found[0].checksum)}
+    assert [m.id for m in mig.pending(found, applied)] == ["002_after"]
+    assert mig.edited(found, applied) == []
+    changed = mig.parse("001_before", "-- sqlsc: before\nALTER TABLE t ADD y int NOT NULL;\n")
+    assert mig.edited([changed], applied) == [changed]
+    recorded = mig.record_sql(found[1], "o'neil", None)
+    assert "VALUES ('002_after', SYSUTCDATETIME(), 'o''neil', SUSER_SNAME()," in recorded
+
+    path = mig.new_file(tmp_path, "Split customer name!", now=datetime(2026, 10, 20, 9, 5))
+    assert path.name == "202610200905_Split-customer-name.sql" and path.read_text().startswith("-- sqlsc: after")
+    assert mig.read_folder(tmp_path)[0].when == "after"
+
+
+def _fake_migration_store(monkeypatch, applied: dict):
+    from coop_sqlsc import migrations as mig
+
+    monkeypatch.setattr(mig, "read_applied", lambda conn: dict(applied))
+
+
+def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_path, fake_db, monkeypatch):
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    folder = tmp_path / "database"
+    (folder / "Views").mkdir(parents=True)
+    (folder / "Views" / "dbo.vSales.sql").write_text("CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n")
+    (folder / "Migrations").mkdir()
+    (folder / "Migrations" / "001_prepare.sql").write_text("-- sqlsc: before\nSELECT 1;\n")
+    (folder / "Migrations" / "002_backfill.sql").write_text("UPDATE dbo.t SET x = 1;\n")
+    _fake_migration_store(monkeypatch, {})
+
+    status = json.loads(run(tmp_path, "--json", "status", "--exit-code").output)
+    assert [m["id"] for m in status["migrations"]["pending"]] == ["001_prepare", "002_backfill"]
+
+    # Written out for review: the before script, the create, then the after script.
+    dry = json.loads(run(tmp_path, "--json", "get-latest", "--dry-run").output)
+    script = dry["script"]
+    assert script.index("001_prepare") < script.index("CREATE VIEW") < script.index("002_backfill")
+    assert "migration script(s) run first" in script and "sqlsc.Migration" in script
+    assert [s["action"] for s in dry["steps"]] == ["create", "migrate", "migrate"]
+
+    # Run: the before script goes on its own, the database is read again, then the rest.
+    plans: list = []
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: plans.append(plan) or _no_failures())
+    result = json.loads(run(tmp_path, "--json", "get-latest").output)
+    assert result["applied"] is True
+    assert [[s.key.name for s in p.steps] for p in plans] == [["001_prepare"], ["vSales", "002_backfill"]]
+    assert [m["id"] for m in result["migrations"]] == ["001_prepare", "002_backfill"]
+    assert [s["object"] for s in result["steps"]][0] == "Migrations/001_prepare.sql"
+
+    # Once recorded, nothing runs again, and a single object's get-latest never runs scripts.
+    from datetime import datetime
+
+    from coop_sqlsc import migrations as mig
+
+    done = {m: mig.Applied(m, datetime(2026, 1, 1), "ada", "x") for m in ("001_prepare", "002_backfill")}
+    _fake_migration_store(monkeypatch, done)
+    plans.clear()
+    again = json.loads(run(tmp_path, "--json", "get-latest").output)
+    assert again["migrations"] == [] and [s["action"] for s in again["steps"]] == ["create"]
+    listing = json.loads(run(tmp_path, "--json", "migrations").output)
+    assert [m["state"] for m in listing["migrations"]] == ["edited", "edited"]  # checksum "x" is not the file's
+
+
+def test_commit_takes_new_migration_scripts_along(tmp_path, fake_db, monkeypatch):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    _fake_migration_store(monkeypatch, {})
+    added = json.loads(run(tmp_path, "--json", "migrations", "add", "backfill region").output)
+    assert added["path"].endswith("_backfill-region.sql")
+    Path(added["path"]).write_text("UPDATE dbo.Customer SET Region = 'NA' WHERE Region IS NULL;\n")
+
+    result = json.loads(run(tmp_path, "--json", "commit").output)
+    rel = f"Migrations/{Path(added['path']).name}"
+    assert result["commit"] and result["migrations"] == [rel]
+    assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD") == "database/" + rel
+    assert "Add 1 migration script(s)" in _git(tmp_path, "log", "-1", "--format=%s")

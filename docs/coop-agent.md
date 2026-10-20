@@ -75,3 +75,11 @@ that, so only pass it when the person has chosen a side.
 `user` is who sqlsc ran as (git `user.email`, or `--as`); `locked_by` names
 who has an object checked out and `mine` is true when that is this user, so
 "checked out by you" needs no name comparison.
+
+`status` also lists `migrations.pending`: hand-written scripts under
+`Migrations/` that this database has not run yet (see the README). A whole
+`get-latest` or `deploy` runs them and lists them under `migrations`; a
+`get-latest` of named objects does not. `sqlsc --json migrations` gives every
+script with its `state` (`pending`, `applied`, `edited`), and
+`sqlsc --json migrations add <name>` creates one and returns its `path`; the
+agent then writes the SQL into that file and commits it with `commit`.

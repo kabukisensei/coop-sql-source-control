@@ -26,9 +26,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import migrations
 from .compare import CHANGED, DELETED, NEW, Change
 from .config import Target
 from .data import identity_off
+from .locks import CREATE_SCHEMA
+from .migrations import BEFORE, Migration
 from .objects import ObjectKey, batches
 from .scripter import qualified, quote
 
@@ -36,6 +39,8 @@ from .scripter import qualified, quote
 # a table change; static data once its tables (and their triggers) exist; table
 # drops last, after nothing reads them any more.
 PH_DROP_CODE, PH_SCHEMA, PH_TABLE, PH_TABLE_KEYS, PH_CODE, PH_DATA, PH_DROP_TABLE, PH_DROP_SCHEMA = range(8)
+# Hand-written migration scripts (migrations.py) bracket the structural changes.
+PH_MIGRATE_BEFORE, PH_MIGRATE_AFTER = -1, 8
 
 _DROP_WORD = {"view": "VIEW", "procedure": "PROCEDURE", "function": "FUNCTION", "trigger": "TRIGGER"}
 _TRANSACTIONAL = {"sql_server", "azure_sql", "fabric_sql_database"}
@@ -93,6 +98,27 @@ class Plan:
         for statement in footer or []:
             lines += [statement.rstrip(), "GO"]
         return "\n".join(lines).rstrip() + "\n"
+
+
+def migration_steps(pending: list[Migration], who: str, commit: str | None) -> list[Step]:
+    """One step per migration that has not run here: its batches, then the row that
+    says it has. The first step of each phase also makes sure sqlsc.Migration exists."""
+    steps: list[Step] = []
+    seen: set[int] = set()
+    for migration in pending:
+        phase = PH_MIGRATE_BEFORE if migration.when == BEFORE else PH_MIGRATE_AFTER
+        ensure = [] if phase in seen else [CREATE_SCHEMA, migrations.CREATE_TABLE]
+        seen.add(phase)
+        steps.append(
+            Step(
+                migration.key,
+                "migrate",
+                phase,
+                [*ensure, *migrations.statements(migration), migrations.record_sql(migration, who, commit)],
+                [f"runs once, {migration.when} the structural changes"],
+            )
+        )
+    return steps
 
 
 def build_plan(changes: list[Change], *, allow_drops: bool, enforced_keys: bool = True) -> Plan:
