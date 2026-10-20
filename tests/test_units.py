@@ -590,10 +590,10 @@ def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypat
     assert [s["object"] for s in forced["steps"]] == ["[dbo].[vSales]"] and forced["kept"] == []
 
 
-def _no_failures():
+def _no_failures(plan=None):
     class Result:
         failed: list = []
-        done: list = []
+        done: list = [s.key for s in plan.steps] if plan else []
         transactional = True
 
     return Result()
@@ -664,6 +664,28 @@ def _fake_migration_store(monkeypatch, applied: dict):
     monkeypatch.setattr(mig, "read_applied", lambda conn: dict(applied))
 
 
+def test_status_text_lists_changes_and_pending_migrations_together(tmp_path, fake_db, monkeypatch):
+    # Found live: with a migration pending, text status hid the object changes, and with
+    # nothing to report it printed "matches" and then an empty "0 new, 0 changed" table.
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    _fake_migration_store(monkeypatch, {})
+    quiet = run(tmp_path, "status").output
+    assert "The repo matches" in quiet and "0 new" not in quiet
+
+    folder = tmp_path / "database"
+    (folder / "Views").mkdir(parents=True)
+    (folder / "Views" / "dbo.vSales.sql").write_text("CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n")
+    (folder / "Migrations").mkdir()
+    (folder / "Migrations" / "001_backfill.sql").write_text("UPDATE dbo.t SET x = 1;\n")
+    both = run(tmp_path, "status").output
+    assert "dbo" in both and "vSales" in both and "1 migration script(s) have not run" in both
+
+    # A repo linked before the sync record existed still gets .sqlsc/ ignored.
+    (tmp_path / ".gitignore").write_text("*.bak\n")
+    run(tmp_path, "status")
+    assert (tmp_path / ".gitignore").read_text() == "*.bak\n.sqlsc/\n"
+
+
 def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_path, fake_db, monkeypatch):
     run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
     folder = tmp_path / "database"
@@ -686,12 +708,15 @@ def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_pa
 
     # Run: the before script goes on its own, the database is read again, then the rest.
     plans: list = []
-    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: plans.append(plan) or _no_failures())
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: plans.append(plan) or _no_failures(plan))
     result = json.loads(run(tmp_path, "--json", "get-latest").output)
     assert result["applied"] is True
     assert [[s.key.name for s in p.steps] for p in plans] == [["001_prepare"], ["vSales", "002_backfill"]]
     assert [m["id"] for m in result["migrations"]] == ["001_prepare", "002_backfill"]
     assert [s["object"] for s in result["steps"]][0] == "Migrations/001_prepare.sql"
+
+    text = run(tmp_path, "get-latest").output
+    assert "Updated 1 object(s) and ran 2 migration script(s)." in text
 
     # Once recorded, nothing runs again, and a single object's get-latest never runs scripts.
     from datetime import datetime
