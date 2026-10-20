@@ -46,11 +46,11 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | --- | --- |
 | `sqlsc init` | Links the repo to a database by writing `sqlsc.yml` |
 | `sqlsc targets` | Lists the databases the repo can talk to |
-| `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo; `--exit-code` exits 1 when anything differs |
+| `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, and which side changed (see *Which side changed*); `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
-| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`); `--push` pushes the branch |
-| `sqlsc get-latest [objects…]` | Changes the database to match the repo; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`); objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch |
+| `sqlsc get-latest [objects…]` | Changes the database to match the repo; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
 | `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them; `--no-commit` only releases them |
 | `sqlsc locks` | Lists who has what checked out; `--mine` for yours, `--all-repos` for every repo sharing the lock table |
@@ -116,6 +116,27 @@ field by field. A Fabric Warehouse or Lakehouse entry with `workspace_id` and
 Fabric API, signed in the same way, with the contract's `fabric.tenant_id`;
 add `server:` in `sqlsc.yml` to skip the lookup. The Fabric system schemas
 `queryinsights` and `_rsc` are never scripted.
+
+## Which side changed
+
+An object that is in the repo but not in the database reads one way only:
+"deleted". That is right when it was dropped from the database (commit should
+remove its file) and wrong when a teammate committed a new object you have not
+applied yet (commit would throw their work away). To tell them apart, sqlsc
+remembers what the repo and each database last agreed on, per object, in
+`.sqlsc/sync/<target>.json` next to `sqlsc.yml` (`init` adds `.sqlsc/` to
+`.gitignore`; the record belongs to one working copy and one database, like
+Redgate's working base). Every `status`, `script`, `commit` and `get-latest`
+brings it up to date, so nothing has to be run to start it.
+
+`status` then shows a *Changed in* column: **Database** (commit it), **Repo**
+(get it with `get-latest`) or **Both** (changed on both sides since the last
+sync: `diff` it, then `commit --force` takes the database's version or
+`get-latest --force` the repo's). `commit` leaves Repo and Both objects alone,
+and `get-latest` leaves Database and Both objects alone, each saying why; in
+`--json` they are listed under `held_back` and `kept`. An object never seen in
+sync (a fresh clone, or a difference older than the record) has no side, and
+both commands treat it the way they always did.
 
 ## How get-latest changes a database
 

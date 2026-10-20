@@ -55,7 +55,17 @@ $ coop-sqlsc --json status --target dev
   "target": {"name": "dev", "kind": "azure_sql", "server": "…", "database": "Sales", "auth": "entra", "source": "coop project.yml"},
   "folder": "C:\\work\\sales\\database",
   "summary": {"new": 1, "changed": 0, "deleted": 0},
-  "changes": [{"action": "new", "type": "view", "schema": "dbo", "name": "vSales", "object": "[dbo].[vSales]", "path": "Views/dbo.vSales.sql"}],
+  "sides": {"to_commit": 1, "to_get": 0, "conflicts": 0, "unknown_side": 0},
+  "changes": [{"action": "new", "origin": "database", "type": "view", "schema": "dbo", "name": "vSales", "object": "[dbo].[vSales]", "path": "Views/dbo.vSales.sql"}],
   "warnings": []
 }
 ```
+
+`origin` says which side moved since the repo and this database last agreed
+(sqlsc keeps that record itself, per target, under `.sqlsc/`): `database`
+(commit it), `repo` (apply it with `get-latest`), `both` (changed on both
+sides: show the diff and ask), or `unknown` (never seen in sync). `commit`
+leaves `repo` and `both` objects alone and lists them under `held_back`;
+`get-latest` leaves `database` and `both` objects alone and lists them under
+`kept`. Each entry carries a `reason`. `--force` on either command overrides
+that, so only pass it when the person has chosen a side.
