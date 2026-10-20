@@ -1,0 +1,55 @@
+name: Release
+
+# Pushing a tag like v1.0.0 builds the CLI package and the SSMS add-in and attaches
+# both to a GitHub Release of that tag, so the team installs from one download.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli
+          path: dist/*
+          if-no-files-found: error
+
+  ssms-vsix:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build the add-in
+        run: msbuild ssms/Extension/CoopSqlSourceControl.Extension.csproj /restore /p:Configuration=Release /v:minimal /nologo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: ssms/Extension/bin/Release/*.vsix
+          if-no-files-found: error
+
+  release:
+    needs: [cli, ssms-vsix]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - run: cp ssms/install-ssms.ps1 out/
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/cli/* out/vsix/*.vsix out/install-ssms.ps1 \
+            --title "$GITHUB_REF_NAME" --generate-notes
