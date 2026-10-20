@@ -321,7 +321,8 @@ spaces normalized.
 The repo is enough for coop-data-doc to map lineage: point its `sql` repo at
 the scripts folder and it reads the views, procedures, functions and triggers
 (`Data/`, `Migrations/` and `Security/` hold no lineage; exclude them). Its
-parse can still miss a reference, for example one made in dynamic SQL.
+parse can still miss a reference, for example in a statement it cannot read or
+a call to a scalar function.
 
 `sqlsc dependencies` writes `Dependencies.json` next to the object folders:
 what each view, procedure, function and trigger references, as the database
@@ -330,7 +331,7 @@ records it in `sys.sql_expression_dependencies`. Commit it once, and every
 in coop-data-doc's `catalog_dependencies` setting and it warns about each
 reference its parse did not find. The list says that an object references
 another, not whether it reads or writes it, so it checks lineage rather than
-adding to it. SQL Server, Azure SQL and Fabric SQL database have the view;
+adding to it. Neither side sees inside dynamic SQL. SQL Server, Azure SQL and Fabric SQL database have the view;
 on a target without it the command says so and commit leaves the file alone.
 
 ## Use from coop-agent

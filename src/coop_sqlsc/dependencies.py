@@ -7,7 +7,9 @@ itself records it in sys.sql_expression_dependencies. From then on `commit` and
 
 coop-data-doc reads the file (its `catalog_dependencies` setting) and warns
 about each reference its own parse of the scripts did not find, so a lineage
-gap (dynamic SQL, an unparsed statement) shows up instead of passing silently.
+gap (a statement the parser could not read, a scalar function call) shows up
+instead of passing silently. Dynamic SQL is not in the list: the database does
+not see inside the strings it runs either.
 
 The list says that one object references another, not whether it reads or
 writes it. It is opt-in: no file, no query. The file is sorted and has no
