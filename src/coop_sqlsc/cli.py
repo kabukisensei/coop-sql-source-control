@@ -33,7 +33,7 @@ from .catalog import platform_schemas, read_database
 from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
-from .deploy import Plan, apply, build_plan, migration_steps
+from .deploy import GUARDED_KINDS, Plan, apply, build_plan, migration_steps
 from .layout import delete_object, key_for_path, objects_from_files, read_folder, relative_path, write_object
 from .locks import Lock, LockError, LockStore
 from .migrations import BEFORE, Applied, Migration
@@ -541,7 +541,12 @@ def run_update(
     changes = _filter(state.changes(), objects)
     kept: list[Change] = [] if force else [c for c in changes if not c.from_repo]
     changes = [c for c in changes if c not in kept]
-    plan = build_plan(changes, allow_drops=allow_drops, enforced_keys=state.target.caps["enforced_keys"])
+    plan = build_plan(
+        changes,
+        allow_drops=allow_drops,
+        enforced_keys=state.target.caps["enforced_keys"],
+        guard_drops=state.target.kind in GUARDED_KINDS,
+    )
     if not (result and result.failed):
         plan.steps += (before if only_script else []) + after
     closing = footer(plan) if footer else []  # a deploy records itself even with nothing to change

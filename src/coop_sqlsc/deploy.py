@@ -121,16 +121,29 @@ def migration_steps(pending: list[Migration], who: str, commit: str | None) -> l
     return steps
 
 
-def build_plan(changes: list[Change], *, allow_drops: bool, enforced_keys: bool = True) -> Plan:
+# Targets whose sys.sql_expression_dependencies says what still reads a column or
+# object, so a drop can refuse while something depends on it (see _still_used_guard).
+GUARDED_KINDS = {"sql_server", "azure_sql", "fabric_sql_database"}
+
+
+def build_plan(
+    changes: list[Change], *, allow_drops: bool, enforced_keys: bool = True, guard_drops: bool = False
+) -> Plan:
     steps: list[Step] = []
+    # Objects this plan drops do not count as still using what else it drops.
+    dropping = (
+        [c.key for c in changes if c.action == NEW and allow_drops and c.key.type in ("table", *_DROP_WORD)]
+        if guard_drops
+        else None
+    )
     for change in changes:
         key = change.key
         if change.action == DELETED:  # only in the repo: create it
             steps.extend(_create_steps(key, change.file_text or ""))
         elif change.action == NEW:  # only in the database: drop it
-            steps.append(_drop_step(key, allow_drops))
+            steps.append(_drop_step(key, allow_drops, dropping))
         elif change.action == CHANGED:
-            steps.append(_change_step(key, change.db_text or "", change.file_text or "", allow_drops))
+            steps.append(_change_step(key, change.db_text or "", change.file_text or "", allow_drops, dropping))
     return Plan(steps)
 
 
@@ -154,7 +167,7 @@ def _create_steps(key: ObjectKey, text: str) -> list[Step]:
     return [Step(key, "create", PH_CODE, parts)]
 
 
-def _drop_step(key: ObjectKey, allow_drops: bool) -> Step:
+def _drop_step(key: ObjectKey, allow_drops: bool, dropping: list[ObjectKey] | None = None) -> Step:
     if key.type == "data":  # never happens: rows are only read for tables the repo tracks
         return Step(key, "skip", PH_DATA, [], ["static data is not tracked in the repo"])
     if key.type == "schema":
@@ -167,7 +180,37 @@ def _drop_step(key: ObjectKey, allow_drops: bool) -> Step:
         return Step(
             key, "skip", phase, [statement], ["in the database but not the repo; pass --allow-drops to drop it"]
         )
-    return Step(key, "drop", phase, [statement])
+    guard = [] if dropping is None or key.type == "schema" else [_still_used_guard(key, None, dropping)]
+    notes = ["refused if a view, function, procedure or trigger still uses it"] if guard else []
+    return Step(key, "drop", phase, [*guard, statement], notes)
+
+
+def _still_used_guard(key: ObjectKey, column: str | None, dropping: list[ObjectKey]) -> str:
+    """A statement that fails, naming them, when other objects still read the object or
+    column about to be dropped. Objects dropped by the same plan are not counted. Only
+    for targets with sys.sql_expression_dependencies (GUARDED_KINDS); the whole update
+    then rolls back, so nothing is half done."""
+
+    def lit(text: str) -> str:
+        return "N'" + text.replace("'", "''") + "'"
+
+    obj = qualified(key.schema, key.name)
+    what = obj + (f".{quote(column)}" if column else "")
+    where = f"d.referenced_id = OBJECT_ID({lit(obj)})"
+    if column:
+        where += f" AND d.referenced_minor_id = COLUMNPROPERTY(d.referenced_id, {lit(column)}, 'ColumnId')"
+    else:
+        where += " AND d.referenced_minor_id = 0"
+    others = [lit(qualified(k.schema, k.name)) for k in dropping if k != key]
+    if others:
+        where += " AND d.referencing_id NOT IN (" + ", ".join(f"OBJECT_ID({o})" for o in others) + ")"
+    message = what + " is still used by %s. Change or drop those first, or do it in a migration script."
+    return (
+        "DECLARE @users nvarchar(max) = (SELECT STRING_AGG(QUOTENAME(OBJECT_SCHEMA_NAME(u.referencing_id)) "
+        "+ '.' + QUOTENAME(OBJECT_NAME(u.referencing_id)), ', ') "
+        f"FROM (SELECT DISTINCT d.referencing_id FROM sys.sql_expression_dependencies AS d WHERE {where}) AS u);\n"
+        f"IF @users IS NOT NULL RAISERROR ({lit(message)}, 16, 1, @users)"
+    )
 
 
 # --- changes ------------------------------------------------------------------------------
@@ -178,7 +221,9 @@ def _data_step(key: ObjectKey, text: str) -> Step:
     return Step(key, "data", PH_DATA, batches(text), cleanup=[off] if off else [])
 
 
-def _change_step(key: ObjectKey, db_text: str, repo_text: str, allow_drops: bool) -> Step:
+def _change_step(
+    key: ObjectKey, db_text: str, repo_text: str, allow_drops: bool, dropping: list[ObjectKey] | None = None
+) -> Step:
     if key.type == "data":
         return _data_step(key, repo_text)
     if key.type in _DROP_WORD:
@@ -186,7 +231,7 @@ def _change_step(key: ObjectKey, db_text: str, repo_text: str, allow_drops: bool
     if key.type == "schema":
         return Step(key, "manual", PH_SCHEMA, [], ["the schema's owner changed; change it with ALTER AUTHORIZATION"])
     try:
-        statements, notes = table_changes(key, db_text, repo_text, allow_drops)
+        statements, notes = table_changes(key, db_text, repo_text, allow_drops, dropping)
     except ManualChange as exc:
         return Step(key, "manual", PH_TABLE, [], [str(exc)])
     if not statements:
@@ -297,7 +342,9 @@ def _split_name(text: str) -> tuple[str, str]:
     return name, rest.strip()
 
 
-def table_changes(key: ObjectKey, db_text: str, repo_text: str, allow_drops: bool) -> tuple[list[str], list[str]]:
+def table_changes(
+    key: ObjectKey, db_text: str, repo_text: str, allow_drops: bool, dropping: list[ObjectKey] | None = None
+) -> tuple[list[str], list[str]]:
     old, new = parse_table(db_text), parse_table(repo_text)
     table = qualified(key.schema, key.name)
     drops: list[str] = []
@@ -326,6 +373,9 @@ def table_changes(key: ObjectKey, db_text: str, repo_text: str, allow_drops: boo
             if old.columns[col] != new.columns[col]:
                 columns.extend(_alter_column(table, key, col, old.columns[col], new.columns[col]))
         elif allow_drops:
+            if dropping is not None:
+                columns.append(_still_used_guard(key, col, dropping))
+                notes.append(f"column {col} is dropped unless a view, function, procedure or trigger still uses it")
             columns.append(_drop_default(key, col))
             columns.append(f"ALTER TABLE {table} DROP COLUMN {quote(col)}")
         else:

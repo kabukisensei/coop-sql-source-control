@@ -552,6 +552,38 @@ def test_plan_orders_creates_and_holds_back_drops():
     assert [s.key for s in plan.held_back] == [gone]
 
 
+def test_allow_drops_refuses_what_other_objects_still_use():
+    # Found on LocalDB: dropping a column a procedure still read left the update failing half way.
+    t = ObjectKey("table", "dbo", "T")
+    gone = ObjectKey("procedure", "dbo", "p")
+    other = ObjectKey("view", "dbo", "v")
+    repo = TABLE.replace("     ,Old int NULL\n", "")
+    plan = build_plan(
+        [
+            Change(t, "changed", TABLE, repo),
+            Change(gone, "new", "CREATE PROCEDURE dbo.p AS SELECT 1\nGO\n", None),
+            Change(other, "new", "CREATE VIEW dbo.v AS SELECT 1 AS a\nGO\n", None),
+        ],
+        allow_drops=True,
+        guard_drops=True,
+    )
+    by_key = {s.key: s for s in plan.runnable}
+    guard = by_key[gone].statements[0]
+    assert "sys.sql_expression_dependencies" in guard and "OBJECT_ID(N'dbo.p')" in guard
+    assert "d.referenced_minor_id = 0" in guard
+    assert "NOT IN (OBJECT_ID(N'dbo.v'))" in guard  # dropped in the same plan, so it does not count
+    assert "dbo.p is still used by %s" in guard
+    assert by_key[gone].statements[-1] == "DROP PROCEDURE dbo.p"
+    assert by_key[gone].notes == ["refused if a view, function, procedure or trigger still uses it"]
+    column = [s for s in by_key[t].statements if "COLUMNPROPERTY(d.referenced_id, N'Old', 'ColumnId')" in s]
+    assert len(column) == 1 and "dbo.T.Old is still used by %s" in column[0]
+    assert by_key[t].statements.index(column[0]) < by_key[t].statements.index("ALTER TABLE dbo.T DROP COLUMN Old")
+    assert "column Old is dropped unless a view, function, procedure or trigger still uses it" in by_key[t].notes
+    # Fabric Warehouse has no sys.sql_expression_dependencies: no guard there.
+    plain = build_plan([Change(gone, "new", "CREATE PROCEDURE dbo.p AS SELECT 1\nGO\n", None)], allow_drops=True)
+    assert plain.runnable[0].statements == ["DROP PROCEDURE dbo.p"] and plain.runnable[0].notes == []
+
+
 # --- sync record: which side moved -------------------------------------------------
 
 from coop_sqlsc.sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord  # noqa: E402
