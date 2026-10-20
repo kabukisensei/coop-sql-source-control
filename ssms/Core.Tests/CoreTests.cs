@@ -42,10 +42,11 @@ namespace CoopSqlSourceControl.Core.Tests
         private const string Status = @"{
   ""ok"": true,
   ""command"": ""status"",
+  ""user"": ""ada@example.com"",
   ""changes"": [
-    {""action"": ""changed"", ""type"": ""view"", ""schema"": ""sales"", ""name"": ""vTotals"", ""object"": ""[sales].[vTotals]"", ""path"": ""Views/sales.vTotals.sql"", ""locked_by"": ""ada@example.com""},
-    {""action"": ""new"", ""type"": ""schema"", ""schema"": """", ""name"": ""audit"", ""object"": ""[audit]"", ""path"": ""Security/Schemas/audit.sql"", ""locked_by"": null},
-    {""action"": ""deleted"", ""type"": ""data"", ""schema"": ""dbo"", ""name"": ""Status"", ""object"": ""[dbo].[Status]"", ""path"": ""Data/dbo.Status.sql""}
+    {""action"": ""changed"", ""type"": ""view"", ""schema"": ""sales"", ""name"": ""vTotals"", ""object"": ""[sales].[vTotals]"", ""path"": ""Views/sales.vTotals.sql"", ""origin"": ""database"", ""locked_by"": ""ada@example.com"", ""mine"": true},
+    {""action"": ""new"", ""type"": ""schema"", ""schema"": """", ""name"": ""audit"", ""object"": ""[audit]"", ""path"": ""Security/Schemas/audit.sql"", ""origin"": ""unknown"", ""locked_by"": null, ""mine"": false},
+    {""action"": ""deleted"", ""type"": ""data"", ""schema"": ""dbo"", ""name"": ""Status"", ""object"": ""[dbo].[Status]"", ""path"": ""Data/dbo.Status.sql"", ""origin"": ""repo"", ""locked_by"": ""bob@example.com""}
   ],
   ""locks"": [
     {""object"": ""[sales].[vTotals]"", ""type"": ""view"", ""schema"": ""sales"", ""name"": ""vTotals"", ""locked_by"": ""ada@example.com"", ""locked_at"": ""2026-10-13T12:10:00+00:00"", ""note"": ""widening"", ""repo"": ""github.com/x/y""}
@@ -67,6 +68,23 @@ namespace CoopSqlSourceControl.Core.Tests
             var lockInfo = Assert.Single(LockInfo.ListFrom(result.Json, "locks"));
             Assert.Equal("widening", lockInfo.Note);
             Assert.Equal(new DateTimeOffset(2026, 10, 13, 12, 10, 0, TimeSpan.Zero), lockInfo.LockedAt.Value.ToUniversalTime());
+        }
+
+        [Fact]
+        public void ShowsYouForYourOwnCheckoutsAndWhichSideMoved()
+        {
+            var json = CliResult.FromOutput(0, Status, string.Empty).Json;
+            var changes = ChangeInfo.ListFrom(json);
+            Assert.Equal(new[] { "you", "", "bob@example.com" }, changes.Select(c => c.LockedByText));
+            Assert.Equal(new[] { "Database", "", "Repo" }, changes.Select(c => c.OriginText));
+            Assert.True(changes[2].IsFromRepo);
+            Assert.Contains("changed in repo, checked out by bob@example.com", changes[2].ToString());
+
+            // The lock list has no `mine` flag: the user name decides, case-insensitively.
+            var lockInfo = Assert.Single(LockInfo.ListFrom(json, "locks"));
+            Assert.True(lockInfo.IsMine);
+            Assert.Equal("you", lockInfo.LockedByText);
+            Assert.Equal("[sales].[vTotals] checked out by you", lockInfo.ToString());
         }
 
         [Fact]

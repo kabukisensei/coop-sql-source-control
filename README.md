@@ -46,7 +46,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | --- | --- |
 | `sqlsc init` | Links the repo to a database by writing `sqlsc.yml` |
 | `sqlsc targets` | Lists the databases the repo can talk to |
-| `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, and which side changed (see *Which side changed*); `--exit-code` exits 1 when anything differs |
+| `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
 | `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`); objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch |

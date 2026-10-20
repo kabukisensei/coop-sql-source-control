@@ -71,6 +71,8 @@
                       ToolTip="Tell the team you are editing the selected objects; with none selected, type the names of objects to check out" />
               <Button x:Name="CheckinButton" Content="Check in" Click="OnCheckinChanges"
                       ToolTip="Commit the selected objects you have checked out, and release them" />
+              <Button x:Name="TrackRowsButton" Content="Track rows…" Click="OnTrackRows"
+                      ToolTip="Keep a lookup table's rows in the repo as static data (sqlsc data add)" />
               <CheckBox x:Name="PushBox" Content="Push" VerticalAlignment="Center" Margin="4,0,0,0"
                         ToolTip="After Commit or Check in, push the branch to its remote" />
             </WrapPanel>
@@ -80,7 +82,8 @@
               <DataGridTextColumn Header="Change" Binding="{Binding ActionText}" Width="Auto" />
               <DataGridTextColumn Header="Type" Binding="{Binding TypeText}" Width="Auto" />
               <DataGridTextColumn Header="Object" Binding="{Binding Object}" Width="*" />
-              <DataGridTextColumn Header="Checked out by" Binding="{Binding LockedBy}" Width="Auto" />
+              <DataGridTextColumn Header="Changed in" Binding="{Binding OriginText}" Width="Auto" />
+              <DataGridTextColumn Header="Checked out by" Binding="{Binding LockedByText}" Width="Auto" />
             </DataGrid.Columns>
           </DataGrid>
         </DockPanel>
@@ -99,7 +102,7 @@
             <DataGrid.Columns>
               <DataGridTextColumn Header="Object" Binding="{Binding Object}" Width="*" />
               <DataGridTextColumn Header="Type" Binding="{Binding TypeText}" Width="Auto" />
-              <DataGridTextColumn Header="Checked out by" Binding="{Binding LockedBy}" Width="Auto" />
+              <DataGridTextColumn Header="Checked out by" Binding="{Binding LockedByText}" Width="Auto" />
               <DataGridTextColumn Header="Since" Binding="{Binding LockedAtText}" Width="Auto" />
               <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="Auto" />
             </DataGrid.Columns>

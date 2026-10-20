@@ -210,8 +210,16 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
             **state.header(),
             "summary": counts,
             "sides": sides,
-            "changes": [{**c.to_json(), "locked_by": _owner(held, c.key)} for c in changes],
-            "locks": [lock.to_json() for lock in held.values()],
+            "user": who,
+            "changes": [
+                {
+                    **c.to_json(),
+                    "locked_by": _owner(held, c.key),
+                    "mine": c.key in held and _same_user(held[c.key].locked_by, who),
+                }
+                for c in changes
+            ],
+            "locks": [{**lock.to_json(), "mine": _same_user(lock.locked_by, who)} for lock in held.values()],
             "warnings": state.warnings,
         },
     )

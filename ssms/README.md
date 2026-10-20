@@ -8,11 +8,16 @@ coop-agent and CI always agree.
 - **Repo / Database**: open a repo's `sqlsc.yml` and pick one of its targets.
   The add-in remembers recent repos and the target last used with each
   (`%APPDATA%\coop-sqlsc\ssms.json`).
-- **Changes**: what differs between the database and the repo, with who has
-  each object checked out. Select rows, then **Commit** (with the message
-  below), **Get latest…** (shows the script, then asks before running it),
-  **Diff** (or double-click a row), **Check out** or **Check in**. With nothing
-  selected, Commit and Get latest act on everything, after asking.
+- **Changes**: what differs between the database and the repo, which side
+  changed (*Changed in*: Database, Repo or Both, see the main README) and who
+  has each object checked out (*you* for your own). Select rows, then
+  **Commit** (with the message below), **Get latest…** (shows the script, then
+  asks before running it), **Diff** (or double-click a row), **Check out**
+  (with an optional note for the team), **Check in**, or **Track rows…** to
+  keep a selected lookup table's rows in the repo as static data. With nothing
+  selected, Commit and Get latest act on everything, after asking. Commit
+  reports what it held back because the repo moved, and Get latest what it
+  kept because the database did.
 - **Checkouts**: everything checked out in this repo. **Check in** commits and
   releases, **Undo checkout** releases without committing, and **Release…**
   takes someone else's checkout away (`sqlsc unlock --force`).
