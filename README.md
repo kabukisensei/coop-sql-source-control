@@ -112,10 +112,12 @@ managed identity. Set `tenant_id` on a target to pin a tenant.
 When the repo (or a parent folder) has coop's `.coop/project.yml`, its
 `sql_targets` entries are targets too, and its `default_environment` is the
 default. An entry in `sqlsc.yml` with the same name is laid over the coop entry
-field by field. A Fabric Warehouse or Lakehouse entry with `workspace_id` and
-`item_id` but no `server` (how coop names them) gets its SQL host from the
-Fabric API, signed in the same way, with the contract's `fabric.tenant_id`;
-add `server:` in `sqlsc.yml` to skip the lookup. The Fabric system schemas
+field by field. A Fabric Warehouse, Lakehouse or SQL database entry with
+`workspace_id` and `item_id` but no `server` (how coop names them) gets its SQL
+host from the Fabric API, signed in the same way, with the contract's
+`fabric.tenant_id`; a SQL database also gets its name on the server
+(`<display name>-<item id>`), which is not its display name. Add `server:` (and,
+for a SQL database, `database:`) in `sqlsc.yml` to skip the lookup. The Fabric system schemas
 `queryinsights` and `_rsc` are never scripted.
 
 ## Which side changed

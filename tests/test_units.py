@@ -439,6 +439,37 @@ def test_pooling_is_off_before_pyodbc_creates_its_environment(monkeypatch):
     assert seen[0] == ("pooling", False) and seen.index(("drivers", None)) > 0
 
 
+def test_fabric_sql_database_items_give_host_and_real_database_name():
+    from coop_sqlsc.fabric_api import connection_host, database_name, item_path
+
+    item = {
+        "displayName": "Coop Dev SQL",
+        "properties": {
+            "serverFqdn": "abc.database.fabric.microsoft.com,1433",
+            "databaseName": "Coop Dev SQL-791b20aa",
+        },
+    }
+    assert connection_host("fabric_sql_database", item) == "abc.database.fabric.microsoft.com"
+    assert database_name("fabric_sql_database", item) == "Coop Dev SQL-791b20aa"
+    assert database_name("fabric_warehouse", item) == ""
+    assert item_path("fabric_sql_database", "w", "i").endswith("/workspaces/w/sqlDatabases/i")
+
+
+def test_coop_fabric_sql_database_targets_use_the_items_database_name(tmp_path, monkeypatch):
+    from coop_sqlsc import fabric_api
+
+    (tmp_path / ".coop").mkdir()
+    (tmp_path / ".coop" / "project.yml").write_text(
+        "sql_targets:\n  default_environment: dev\n"
+        "  dev:\n    kind: fabric_sql_database\n    workspace_id: w-1\n    item_id: i-1\n    database: Coop Dev SQL\n"
+    )
+    (tmp_path / "sqlsc.yml").write_text("folder: database\n")
+    monkeypatch.setattr(fabric_api, "lookup_server", lambda *a: "abc.database.fabric.microsoft.com")
+    monkeypatch.setattr(fabric_api, "lookup_database", lambda *a: "Coop Dev SQL-i-1")
+    target = load(tmp_path).target()
+    assert target.server == "abc.database.fabric.microsoft.com" and target.database == "Coop Dev SQL-i-1"
+
+
 def test_cli_errors_are_json_for_agents(tmp_path):
     result = CliRunner().invoke(cli_mod.main, ["--json", "--config", str(tmp_path / "missing.yml"), "status"])
     assert result.exit_code == 2

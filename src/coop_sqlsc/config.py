@@ -218,19 +218,24 @@ def build_target(name: str, raw: dict[str, Any], *, source: str = CONFIG_NAME) -
 
 
 def _fill_fabric_server(name: str, raw: dict[str, Any]) -> None:
-    """A Fabric Warehouse or Lakehouse entry with workspace_id and item_id but no server
-    (how coop's contract names them) gets its SQL host from the Fabric API."""
+    """A Fabric Warehouse, Lakehouse or SQL database entry with workspace_id and item_id but
+    no server (how coop's contract names them) gets its SQL host from the Fabric API. A SQL
+    database also gets its name on the server, which is not its display name."""
     kind = _text(raw.get("kind"))
     server = _text(raw.get("server"))
     workspace_id, item_id = _text(raw.get("workspace_id")), _text(raw.get("item_id"))
-    if kind not in ("fabric_warehouse", "fabric_lakehouse") or (server and not server.upper().startswith("TODO")):
+    fabric_kinds = ("fabric_warehouse", "fabric_lakehouse", "fabric_sql_database")
+    if kind not in fabric_kinds or (server and not server.upper().startswith("TODO")):
         return
     if not workspace_id or not item_id:
         return  # build_target explains the missing server
-    from .fabric_api import FabricLookupError, lookup_server
+    from .fabric_api import FabricLookupError, lookup_database, lookup_server
 
+    tenant = _text(raw.get("tenant_id"))
     try:
-        raw["server"] = lookup_server(kind, workspace_id, item_id, _text(raw.get("tenant_id")))
+        raw["server"] = lookup_server(kind, workspace_id, item_id, tenant)
+        if kind == "fabric_sql_database":
+            raw["database"] = lookup_database(kind, workspace_id, item_id, tenant) or raw.get("database")
     except FabricLookupError as exc:
         raise ConfigError(
             f"Target '{name}' has no server, and looking it up from workspace_id and item_id failed: {exc}. "
