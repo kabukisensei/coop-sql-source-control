@@ -310,6 +310,19 @@ docker run -d -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Sqlsc_Dev_Pw1!' -p 1433:143
 SQLSC_TEST_SERVER=localhost,1433 SQLSC_PASSWORD='Sqlsc_Dev_Pw1!' pytest   # plus the live tests
 ```
 
+On Windows without Docker, SQL Server Express LocalDB works too. It accepts SQL
+logins, so give its `sa` a password once, from a Windows-authenticated
+connection (SSMS, or sqlcmd if you have it):
+
+```sql
+ALTER LOGIN sa WITH PASSWORD = '<a password>', CHECK_POLICY = OFF; ALTER LOGIN sa ENABLE;
+```
+
+```powershell
+$env:SQLSC_TEST_SERVER = '(localdb)\MSSQLLocalDB'; $env:SQLSC_PASSWORD = '<that password>'
+pytest -m integration
+```
+
 The live tests build a sample database, script it, rebuild a second database
 from the files with `get-latest` and check that it scripts back identically, then
 exercise table alters with data in place, held-back drops, rollback on failure,

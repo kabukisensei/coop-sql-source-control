@@ -605,6 +605,24 @@ def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypat
     assert [s["object"] for s in forced["steps"]] == ["[dbo].[vSales]"] and forced["kept"] == []
 
 
+def test_a_failed_update_reads_cleanly(tmp_path, fake_db, monkeypatch):
+    # SQL Server's messages end with a period; the CLI added another ("conditions.. Every").
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    (tmp_path / "database" / "Views").mkdir(parents=True)
+    (tmp_path / "database" / "Views" / "dbo.vNew.sql").write_text("CREATE VIEW dbo.vNew AS SELECT 1;\nGO\n")
+
+    class Failed:
+        failed = [(ObjectKey("view", "dbo", "vNew"), "it does not satisfy these conditions.")]
+        done: list = []
+        transactional = True
+
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: Failed())
+    result = run(tmp_path, "get-latest")
+    assert result.exit_code == 1
+    text = " ".join(result.output.split())
+    assert "these conditions. Every change was rolled back." in text and ".." not in text
+
+
 def _no_failures(plan=None):
     class Result:
         failed: list = []

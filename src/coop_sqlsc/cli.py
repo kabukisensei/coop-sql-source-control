@@ -637,7 +637,8 @@ def run_update(
     elif result is not None and result.failed:
         key, message = result.failed[0]
         undone = " Every change was rolled back." if result.transactional else ""
-        console.print(f"[red]✗[/] {escape(key.display)} failed: {escape(message)}.{undone}")
+        # SQL Server's own messages end with a period already.
+        console.print(f"[red]✗[/] {escape(key.display)} failed: {escape(message.rstrip().rstrip('.'))}.{undone}")
         sys.exit(1)
     elif result is not None:
         ran = [k for k in result.done if k.type == "migration"]
