@@ -227,7 +227,8 @@ database as it was at that moment, so write it again if the database changes
 before it runs. Protected targets (named `prod`, `production`, `prd` or `live`,
 or `protected: true`) need `--confirm` with the target's name. Every release, run
 by `sqlsc` or by hand from the script in SSMS or sqlcmd, ends by adding a row to
-`sqlsc.Deployment` with the commit, the ref, who prepared it and the login that
+`sqlsc.Deployment` (even one with nothing left to change, so the history says
+what was released) with the commit, the ref, who prepared it and the login that
 ran it; `sqlsc history` reads that table. Drops still need `--allow-drops`, and
 changes `ALTER` cannot make safely are still held back with the reason.
 

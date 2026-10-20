@@ -811,3 +811,37 @@ def test_commit_takes_new_migration_scripts_along(tmp_path, fake_db, monkeypatch
     assert result["commit"] and result["migrations"] == [rel]
     assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD") == "database/" + rel
     assert "Add 1 migration script(s)" in _git(tmp_path, "log", "-1", "--format=%s")
+
+
+def test_a_deploy_with_nothing_to_change_still_records_the_release(tmp_path, fake_db, monkeypatch):
+    # Found on the Fabric SQL database: history said "No releases recorded" for a database
+    # that was at the released commit, because the record only went in with the changes.
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    assert run(tmp_path, "script").exit_code == 0
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "v1")
+
+    executed: list[str] = []
+
+    class Cursor:
+        def execute(self, statement, *params):
+            executed.append(statement)
+            return self
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli_mod, "open_connection", lambda target: Conn())
+    result = json.loads(run(tmp_path, "--json", "deploy", "--ref", "HEAD").output)
+    assert result["steps"] == [] and result["recorded"] is True
+    assert any(s.startswith("INSERT INTO sqlsc.Deployment") and ", 0)" in s for s in executed)
+    text = run(tmp_path, "deploy", "--ref", "HEAD").output
+    assert "Recorded the release in sqlsc.Deployment" in text
