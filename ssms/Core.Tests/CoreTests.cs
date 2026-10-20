@@ -51,7 +51,7 @@ namespace CoopSqlSourceControl.Core.Tests
   ""locks"": [
     {""object"": ""[sales].[vTotals]"", ""type"": ""view"", ""schema"": ""sales"", ""name"": ""vTotals"", ""locked_by"": ""ada@example.com"", ""locked_at"": ""2026-10-13T12:10:00+00:00"", ""note"": ""widening"", ""repo"": ""github.com/x/y""}
   ],
-  ""migrations"": {""pending"": [{""id"": ""202610201030_backfill-region"", ""when"": ""after""}], ""edited"": []}
+  ""migrations"": {""pending"": [{""id"": ""20261020103000_backfill-region"", ""when"": ""after""}], ""edited"": []}
 }";
 
         [Fact]
@@ -92,7 +92,7 @@ namespace CoopSqlSourceControl.Core.Tests
         public void ReadsPendingAndRanMigrations()
         {
             var status = CliResult.FromOutput(0, Status, string.Empty).Json;
-            Assert.Equal(new[] { "202610201030_backfill-region" }, MigrationInfo.PendingFrom(status));
+            Assert.Equal(new[] { "20261020103000_backfill-region" }, MigrationInfo.PendingFrom(status));
             // Older sqlsc versions have no migrations block at all.
             Assert.Empty(MigrationInfo.PendingFrom(CliResult.FromOutput(0, "{\"ok\": true, \"changes\": []}", "").Json));
 

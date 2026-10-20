@@ -485,6 +485,21 @@ def test_table_changes_alter_in_place():
     assert "ALTER TABLE dbo.T DROP COLUMN Old" in dropped
 
 
+def test_a_not_null_column_without_a_default_is_flagged():
+    # Found on LocalDB: the ADD runs, then fails on a table with rows (and the update rolls back).
+    key = ObjectKey("table", "dbo", "T")
+    repo = TABLE.replace("     ,Old int NULL\n", "     ,Old int NULL\n     ,Region varchar(10) NOT NULL\n")
+    steps, notes = table_changes(key, TABLE, repo, allow_drops=False)
+    assert "ALTER TABLE dbo.T ADD Region varchar(10) NOT NULL" in steps
+    assert [n for n in notes if "Region" in n] == [
+        "column Region is NOT NULL with no DEFAULT: the ADD fails if the table has rows; "
+        "give it a DEFAULT, or add it nullable and fill it in a before migration script"
+    ]
+    with_default = repo.replace("varchar(10) NOT NULL", "varchar(10) NOT NULL CONSTRAINT DF_T_Region DEFAULT ('NA')")
+    _, quiet = table_changes(key, TABLE, with_default, allow_drops=False)
+    assert not [n for n in quiet if "Region" in n]
+
+
 def test_identity_change_needs_a_migration():
     with pytest.raises(ManualChange, match="IDENTITY"):
         table_changes(ObjectKey("table", "dbo", "T"), TABLE, TABLE.replace("IDENTITY(1, 1) ", ""), allow_drops=True)
@@ -654,7 +669,7 @@ def test_migration_files_know_when_they_run_and_when_they_were_edited(tmp_path):
     assert "VALUES ('002_after', SYSUTCDATETIME(), 'o''neil', SUSER_SNAME()," in recorded
 
     path = mig.new_file(tmp_path, "Split customer name!", now=datetime(2026, 10, 20, 9, 5))
-    assert path.name == "202610200905_Split-customer-name.sql" and path.read_text().startswith("-- sqlsc: after")
+    assert path.name == "20261020090500_Split-customer-name.sql" and path.read_text().startswith("-- sqlsc: after")
     assert mig.read_folder(tmp_path)[0].when == "after"
 
 
