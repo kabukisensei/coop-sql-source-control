@@ -28,13 +28,14 @@ from . import __version__, git_ops, locks
 from . import config as config_mod
 from . import data as data_mod
 from .catalog import platform_schemas, read_database
-from .compare import CHANGED, DELETED, NEW, Change, compare, matches, summarize
+from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
 from .deploy import Plan, apply, build_plan
 from .layout import delete_object, key_for_path, objects_from_files, read_folder, relative_path, write_object
 from .locks import Lock, LockError, LockStore
 from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
+from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
@@ -143,6 +144,7 @@ def init(
     attributes = path.parent / ".gitattributes"
     if not attributes.exists():
         attributes.write_text("*.sql text diff\n", encoding="utf-8")
+    _ignore_sync_dir(path.parent)
     emit(opts, {"command": "init", "config": str(path), "folder": folder, "target": target_name})
     if not opts.as_json:
         console.print(f"[green]✓[/] Wrote {escape(str(path))}")
@@ -197,8 +199,9 @@ AS_OPTION = click.option(
 def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | None) -> None:
     """Show which objects differ between the database and the repo, and who has them checked out."""
     state = _read_state(opts, target_name)
-    changes = compare(state.db, state.folder)
+    changes = state.changes()
     counts = summarize(changes)
+    sides = _sides(changes)
     held, who = _peek_locks(state, as_user)
     emit(
         opts,
@@ -206,6 +209,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
             "command": "status",
             **state.header(),
             "summary": counts,
+            "sides": sides,
             "changes": [{**c.to_json(), "locked_by": _owner(held, c.key)} for c in changes],
             "locks": [lock.to_json() for lock in held.values()],
             "warnings": state.warnings,
@@ -219,9 +223,9 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
             _print_changes(changes, held, who)
             console.print()
             console.print(
-                f"{counts[NEW]} new, {counts[CHANGED]} changed, {counts[DELETED]} deleted. "
-                "Run [bold]sqlsc diff <object>[/] to see one, or [bold]sqlsc script[/] to bring the repo up to date."
+                f"{counts[NEW]} new, {counts[CHANGED]} changed, {counts[DELETED]} deleted: " + _sides_text(sides)
             )
+            console.print("Run [bold]sqlsc diff <object>[/] to see one.")
         mine = [lock for lock in held.values() if _same_user(lock.locked_by, who)]
         if mine:
             console.print(
@@ -240,7 +244,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
 def diff(opts: Opts, objects: tuple[str, ...], target_name: str | None, context: int) -> None:
     """Show the text differences, for all objects or the ones named (e.g. dbo.Customer)."""
     state = _read_state(opts, target_name)
-    changes = _filter(compare(state.db, state.folder), objects)
+    changes = _filter(state.changes(), objects)
     items = [{**c.to_json(), "diff": c.unified_diff(context=context)} for c in changes]
     emit(opts, {"command": "diff", **state.header(), "changes": items, "warnings": state.warnings})
     if opts.as_json:
@@ -250,7 +254,8 @@ def diff(opts: Opts, objects: tuple[str, ...], target_name: str | None, context:
         return
     for change, item in zip(changes, items, strict=True):
         style = ACTION_STYLE[change.action]
-        console.rule(f"[{style}]{ACTION_WORDS[change.action]}[/] {escape(change.key.display)}", align="left")
+        side = f" [dim]({_side_note(change)})[/]" if change.origin != UNKNOWN else ""
+        console.rule(f"[{style}]{ACTION_WORDS[change.action]}[/] {escape(change.key.display)}{side}", align="left")
         console.print(Syntax(item["diff"], "diff", theme="ansi_dark", background_color="default", word_wrap=True))
     _print_warnings(state.warnings)
 
@@ -263,15 +268,13 @@ def diff(opts: Opts, objects: tuple[str, ...], target_name: str | None, context:
 def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_run: bool) -> None:
     """Write the database's objects into the repo folder (new, changed and deleted files)."""
     state = _read_state(opts, target_name)
-    changes = _filter(compare(state.db, state.folder), objects)
+    changes = _filter(state.changes(), objects)
     written: list[dict[str, str]] = []
     for change in changes:
         if not dry_run:
-            if change.action == DELETED:
-                delete_object(state.scripts_dir, change.key)
-            else:
-                write_object(state.scripts_dir, change.key, change.db_text or "")
+            _write_from_database(state, change)
         written.append(change.to_json())
+    state.sync.save()
     emit(
         opts,
         {
@@ -322,15 +325,20 @@ def commit(
     """Script the database's changes into the repo and commit just those files.
 
     Objects someone else has checked out are left for them to check in, unless --force.
+    So are objects the repo changed since your last sync (a teammate's commit you have
+    not applied yet): committing them would overwrite that work with the database's
+    older version. Run `sqlsc get-latest` for those, or --force to commit them anyway.
     """
     state = _read_state(opts, target_name)
-    differences = compare(state.db, state.folder)
+    differences = state.changes()
     changes = _filter(differences + _uncommitted(state, {c.key for c in differences}), objects)
     held, who = _peek_locks(state, as_user)
     skipped: list[Change] = []
+    held_back: list[Change] = []
     if not force:
         skipped = [c for c in changes if c.key in held and not _same_user(held[c.key].locked_by, who)]
-        changes = [c for c in changes if c not in skipped]
+        held_back = [c for c in changes if c not in skipped and not c.from_database]
+        changes = [c for c in changes if c not in skipped and c not in held_back]
     sha, branch = _commit_changes(opts, state, changes, message, push)
     emit(
         opts,
@@ -343,6 +351,7 @@ def commit(
             "summary": summarize(changes),
             "files": [c.to_json() for c in changes],
             "skipped": [{**c.to_json(), "locked_by": held[c.key].locked_by} for c in skipped],
+            "held_back": [{**c.to_json(), "reason": _hold_reason(c)} for c in held_back],
             "warnings": state.warnings,
         },
     )
@@ -363,6 +372,8 @@ def commit(
             f"[yellow]![/] Left {escape(change.key.display)}: checked out by {escape(held[change.key].locked_by)}"
             " (--force commits it anyway)."
         )
+    for change in held_back:
+        console.print(f"[yellow]![/] Left {escape(change.key.display)}: {escape(_hold_reason(change))}")
     _print_warnings(state.warnings)
 
 
@@ -381,10 +392,9 @@ def _commit_changes(
     for change in changes:
         if change.key in state.uncommitted:
             paths.append(state.scripts_dir / relative_path(change.key))  # already right on disk; commit as it is
-        elif change.action == DELETED:
-            paths.append(delete_object(state.scripts_dir, change.key))
         else:
-            paths.append(write_object(state.scripts_dir, change.key, change.db_text or ""))
+            paths.append(_write_from_database(state, change))
+    state.sync.save()
     try:
         sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes))
     except git_ops.GitError as exc:
@@ -415,11 +425,27 @@ def _commit_changes(
 @click.option(
     "--allow-drops", is_flag=True, help="Also drop objects and columns that are in the database but not the repo."
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Also overwrite objects changed in the database since your last sync (uncommitted work).",
+)
 @click.pass_obj
 def get_latest(
-    opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_run: bool, output: Path | None, allow_drops: bool
+    opts: Opts,
+    objects: tuple[str, ...],
+    target_name: str | None,
+    dry_run: bool,
+    output: Path | None,
+    allow_drops: bool,
+    force: bool,
 ) -> None:
-    """Update the database to match the repo (like Redgate's Get latest)."""
+    """Update the database to match the repo (like Redgate's Get latest).
+
+    Objects changed in the database since your last sync are left alone, since
+    applying the repo's version would wipe uncommitted work: commit them first,
+    or --force to overwrite them.
+    """
     state = _read_state(opts, target_name)
     if not (dry_run or output is not None) and state.target.protected:
         protected_message = (
@@ -436,6 +462,7 @@ def get_latest(
         dry_run=dry_run,
         output=output,
         allow_drops=allow_drops,
+        force=force,
         blocked=protected_message,
     )
 
@@ -449,14 +476,18 @@ def run_update(
     dry_run: bool,
     output: Path | None,
     allow_drops: bool,
+    force: bool = True,
     blocked: str | None = None,
     header: list[str] | None = None,
     footer: Callable[[Plan], list[str]] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Plans, writes and (unless only a script was asked for) runs the changes that
-    make state.target match state.folder. Shared by get-latest and deploy."""
-    changes = _filter(compare(state.db, state.folder), objects)
+    make state.target match state.folder. Shared by get-latest and deploy. Without
+    `force`, objects the database changed since the last sync are kept as they are."""
+    changes = _filter(state.changes(), objects)
+    kept: list[Change] = [] if force else [c for c in changes if not c.from_repo]
+    changes = [c for c in changes if c not in kept]
     plan = build_plan(changes, allow_drops=allow_drops, enforced_keys=state.target.caps["enforced_keys"])
     closing = footer(plan) if footer and plan.runnable else []
     script_text = plan.script(state.target, header, closing)
@@ -491,7 +522,8 @@ def run_update(
         except (ConfigError, ConnectError) as exc:
             fail(opts, "connect", str(exc))
             raise
-        remaining = _filter(compare(after, state.folder), objects)
+        remaining = _filter(compare(after, state.folder, state.sync), objects)
+        state.sync.save()
 
     payload: dict[str, Any] = {
         "command": command,
@@ -500,6 +532,7 @@ def run_update(
         "applied": result is not None and not result.failed,
         "steps": [s.to_json() for s in plan.steps],
         "held_back": [s.to_json() for s in plan.held_back],
+        "kept": [{**c.to_json(), "reason": _keep_reason(c)} for c in kept],
         "warnings": state.warnings,
     }
     if output is not None:
@@ -519,6 +552,7 @@ def run_update(
     _print_header(state)
     if not plan.steps:
         console.print("[green]✓[/] Nothing to do; the database already matches the repo.")
+        _print_kept(kept)
         return
     if dry_run:
         console.print(Syntax(script_text, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
@@ -544,7 +578,13 @@ def run_update(
             console.print(f"[yellow]![/] {len(remaining)} object(s) still differ; run `sqlsc status` to see them.")
     if plan.held_back:
         console.print(f"[yellow]![/] {len(plan.held_back)} change(s) were held back (see notes above).")
+    _print_kept(kept)
     _print_warnings(state.warnings)
+
+
+def _print_kept(kept: list[Change]) -> None:
+    for change in kept:
+        console.print(f"[yellow]![/] Kept {escape(change.key.display)}: {escape(_keep_reason(change))}")
 
 
 def _default_message(state: State, changes: list[Change]) -> str:
@@ -636,9 +676,13 @@ def checkin(
         if keys and not no_commit:
             state = _read_state(opts, target.name)
             wanted = set(keys)
-            differences = compare(state.db, state.folder)
+            differences = state.changes()
             pending = _uncommitted(state, {c.key for c in differences})
             changes = [c for c in differences + pending if c.key in wanted]
+            held_back = [c for c in changes if not c.from_database]
+            changes = [c for c in changes if c.from_database]
+            for change in held_back:
+                state.warnings.append(f"Left {change.key.display} out of the commit: {_hold_reason(change)}")
             sha, branch = _commit_changes(opts, state, changes, message, push)
         released, _ = _guarded(opts, lambda: session.store.release(keys, repo=session.repo, who=session.who))
     payload = {
@@ -983,6 +1027,8 @@ class State:
     # Objects whose file matches the database but not HEAD (see _uncommitted).
     uncommitted: set[ObjectKey] = field(default_factory=set)
     push_error: str | None = None
+    # What this working copy and the target last agreed on (see sync.py).
+    sync: SyncRecord = field(default_factory=lambda: SyncRecord(None))
 
     @property
     def scripts_dir(self) -> Path:
@@ -990,6 +1036,12 @@ class State:
 
     def header(self) -> dict[str, Any]:
         return {"target": self.target.summary(), "folder": str(self.scripts_dir)}
+
+    def changes(self) -> list[Change]:
+        """The differences, with the side that moved; also brings the sync record up to date."""
+        changes = compare(self.db, self.folder, self.sync)
+        self.sync.save()
+        return changes
 
 
 def _load_config(opts: Opts) -> config_mod.Config:
@@ -1046,7 +1098,96 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     warnings += [
         f"{path} is in an object folder but its name is not schema.object.sql; it was ignored." for path in unknown
     ]
-    return State(cfg, target, result.objects, folder, warnings)
+    # A deploy reads the repo at a commit, not this working copy: no sync record applies.
+    sync = SyncRecord.load(cfg.root, target.name) if files is None else SyncRecord(None)
+    return State(cfg, target, result.objects, folder, warnings, sync=sync)
+
+
+def _write_from_database(state: State, change: Change) -> Path:
+    """Makes the object's file match the database, and notes the two sides as synced."""
+    if change.action == DELETED:
+        path = delete_object(state.scripts_dir, change.key)
+        state.sync.forget(change.key)
+    else:
+        path = write_object(state.scripts_dir, change.key, change.db_text or "")
+        state.sync.record(change.key, comparable(change.key, change.db_text or ""))
+    return path
+
+
+def _sides(changes: list[Change]) -> dict[str, int]:
+    return {
+        "to_commit": sum(1 for c in changes if c.origin == DATABASE),
+        "to_get": sum(1 for c in changes if c.origin == REPO),
+        "conflicts": sum(1 for c in changes if c.origin == BOTH),
+        "unknown_side": sum(1 for c in changes if c.origin == UNKNOWN),
+    }
+
+
+def _sides_text(sides: dict[str, int]) -> str:
+    parts = []
+    if sides["to_commit"]:
+        parts.append(f"{sides['to_commit']} to commit ([bold]sqlsc commit[/])")
+    if sides["to_get"]:
+        parts.append(f"{sides['to_get']} to get ([bold]sqlsc get-latest[/])")
+    if sides["conflicts"]:
+        parts.append(f"{sides['conflicts']} changed on both sides")
+    if sides["unknown_side"]:
+        parts.append(f"{sides['unknown_side']} not seen in sync before")
+    return ", ".join(parts) + "."
+
+
+def _side_note(change: Change) -> str:
+    if change.origin == DATABASE:
+        return "dropped from the database" if change.action == DELETED else "changed in the database"
+    if change.origin == REPO:
+        return "in the repo, not applied here yet" if change.action == DELETED else "changed in the repo"
+    if change.origin == BOTH:
+        return "changed in the database and in the repo"
+    return "not seen in sync before"
+
+
+def _hold_reason(change: Change) -> str:
+    """Why commit leaves an object alone."""
+    if change.origin == BOTH:
+        return (
+            "changed in the database and in the repo since your last sync; "
+            "diff it, then --force to commit the database's version"
+        )
+    if change.action == DELETED:
+        return "in the repo but never applied here; `sqlsc get-latest` creates it (--force deletes the file instead)"
+    if change.action == NEW:
+        return (
+            "the repo dropped it since your last sync; "
+            "`sqlsc get-latest --allow-drops` drops it here (--force re-adds the file)"
+        )
+    return "the repo changed it since your last sync; `sqlsc get-latest` applies it (--force commits the database's)"
+
+
+def _keep_reason(change: Change) -> str:
+    """Why get-latest leaves an object alone."""
+    if change.origin == BOTH:
+        return (
+            "changed in the database and in the repo since your last sync; "
+            "diff it, then --force to apply the repo's version"
+        )
+    if change.action == NEW:
+        return "new in the database since your last sync; commit it (--force with --allow-drops drops it)"
+    if change.action == DELETED:
+        return "dropped from the database since your last sync; commit removes its file (--force recreates it)"
+    return "changed in the database since your last sync; commit it (--force overwrites it)"
+
+
+def _ignore_sync_dir(root: Path) -> None:
+    """Keeps the sync record out of git: it describes one working copy and one database."""
+    ignore = root / ".gitignore"
+    line = ".sqlsc/"
+    existing = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    if line in existing.splitlines():
+        return
+    with ignore.open("a", encoding="utf-8", newline="\n") as handle:
+        if existing and not existing.endswith("\n"):
+            handle.write("\n")
+        handle.write(f"{line}\n")
 
 
 def _read_static_data(
@@ -1088,9 +1229,10 @@ def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
         if key is None or key in differing:
             continue
         if how == "deleted":
-            found.append(Change(key, DELETED, None, None))
+            found.append(Change(key, DELETED, None, None, DATABASE))
         elif key in state.folder:
-            found.append(Change(key, NEW if how == "added" else CHANGED, state.folder[key], state.folder[key]))
+            text = state.folder[key]
+            found.append(Change(key, NEW if how == "added" else CHANGED, text, text, DATABASE))
         else:
             continue
         state.uncommitted.add(key)
@@ -1115,15 +1257,21 @@ def _print_header(state: State) -> None:
 def _print_changes(changes: list[Change], held: dict[ObjectKey, Lock] | None = None, who: str = "") -> None:
     held = held or {}
     show_locks = any(c.key in held for c in changes)
+    show_sides = any(c.origin != UNKNOWN for c in changes)
     table = RichTable(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("Change")
     table.add_column("Type")
     table.add_column("Object")
+    if show_sides:
+        table.add_column("Changed in")
     if show_locks:
         table.add_column("Checked out by")
     for change in changes:
         style = ACTION_STYLE[change.action]
         cells = [f"[{style}]{ACTION_WORDS[change.action]}[/]", TYPE_LABELS[change.key.type], escape(change.key.display)]
+        if show_sides:
+            word = ORIGIN_WORDS[change.origin]
+            cells.append(f"[red]{word}[/]" if change.origin == BOTH else word)
         if show_locks:
             lock = held.get(change.key)
             cells.append(

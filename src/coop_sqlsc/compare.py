@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .layout import relative_path
 from .objects import TYPE_LABELS, ObjectKey, batches
+from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
 
 NEW, CHANGED, DELETED = "new", "changed", "deleted"
 
@@ -24,14 +25,27 @@ class Change:
     action: str
     db_text: str | None
     file_text: str | None
+    # Which side moved since the last sync (sync.DATABASE, REPO, BOTH or UNKNOWN).
+    origin: str = UNKNOWN
 
     @property
     def path(self) -> str:
         return relative_path(self.key)
 
+    @property
+    def from_database(self) -> bool:
+        """Something to commit: the database moved, or nothing says the repo did."""
+        return self.origin in (DATABASE, UNKNOWN)
+
+    @property
+    def from_repo(self) -> bool:
+        """Something to get: the repo moved, or nothing says the database did."""
+        return self.origin in (REPO, UNKNOWN)
+
     def to_json(self) -> dict[str, str]:
         return {
             "action": self.action,
+            "origin": self.origin,
             "type": self.key.type,
             "schema": self.key.schema,
             "name": self.key.name,
@@ -47,18 +61,35 @@ class Change:
         )
 
 
-def compare(db: dict[ObjectKey, str], folder: dict[ObjectKey, str]) -> list[Change]:
+def compare(db: dict[ObjectKey, str], folder: dict[ObjectKey, str], sync: SyncRecord | None = None) -> list[Change]:
+    """The differences, each marked with the side that moved when `sync` can tell.
+    Objects that match on both sides are recorded in `sync` as the last synced text,
+    and objects gone from both sides are forgotten; the caller saves it."""
     changes: list[Change] = []
     for key in db.keys() | folder.keys():
         in_db, in_folder = key in db, key in folder
+        db_c = comparable(key, db[key]) if in_db else None
+        file_c = comparable(key, folder[key]) if in_folder else None
         if in_db and not in_folder:
-            changes.append(Change(key, NEW, db[key], None))
+            action, db_text, file_text = NEW, db[key], None
         elif in_folder and not in_db:
-            changes.append(Change(key, DELETED, None, folder[key]))
-        elif comparable(key, db[key]) != comparable(key, folder[key]):
-            changes.append(Change(key, CHANGED, db[key], folder[key]))
+            action, db_text, file_text = DELETED, None, folder[key]
+        elif db_c != file_c:
+            action, db_text, file_text = CHANGED, db[key], folder[key]
+        else:
+            if sync is not None and db_c is not None:
+                sync.record(key, db_c)
+            continue
+        origin = sync.origin(key, db_c, file_c) if sync is not None else UNKNOWN
+        changes.append(Change(key, action, db_text, file_text, origin))
+    if sync is not None:
+        for key in [k for k in sync.hashes if k not in db and k not in folder]:
+            sync.forget(key)
     changes.sort(key=lambda c: c.key.sort_key)
     return changes
+
+
+ORIGIN_WORDS = {DATABASE: "Database", REPO: "Repo", BOTH: "Both", UNKNOWN: ""}
 
 
 def comparable(key: ObjectKey, text: str) -> str:

@@ -504,3 +504,96 @@ def test_plan_orders_creates_and_holds_back_drops():
     )
     assert [s.key for s in sorted(plan.runnable, key=lambda s: s.phase)] == [t, v]
     assert [s.key for s in plan.held_back] == [gone]
+
+
+# --- sync record: which side moved -------------------------------------------------
+
+from coop_sqlsc.sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord  # noqa: E402
+
+
+def test_sync_record_tells_dropped_from_not_yet_applied(tmp_path):
+    view, proc = ObjectKey("view", "dbo", "v1"), ObjectKey("procedure", "dbo", "p1")
+    text = "CREATE VIEW dbo.v1 AS SELECT 1;\nGO\n"
+    sync = SyncRecord.load(tmp_path, "dev")
+    assert not sync.path.exists()
+
+    # First look: both sides hold v1; nothing is known about p1.
+    changes = compare({view: text}, {view: text, proc: "CREATE PROC dbo.p1 AS SELECT 1;\nGO\n"}, sync)
+    assert [(c.key, c.action, c.origin) for c in changes] == [(proc, DELETED, REPO)]  # a teammate's new proc
+    sync.save()
+    assert json.loads(sync.path.read_text())["objects"] == {"Views/dbo.v1.sql": sync.hashes[view]}
+
+    # Later: v1 is gone from the database. It was synced before, so it was dropped.
+    sync = SyncRecord.load(tmp_path, "dev")
+    (change,) = compare({}, {view: text}, sync)
+    assert (change.action, change.origin) == (DELETED, DATABASE)
+
+    # Changed on one side only: the side that still matches the record did not move.
+    sync = SyncRecord.load(tmp_path, "dev")
+    other = text.replace("1", "2")
+    assert compare({view: other}, {view: text}, sync)[0].origin == DATABASE
+    assert compare({view: text}, {view: other}, sync)[0].origin == REPO
+    assert compare({view: other}, {view: other.replace("2", "3")}, sync)[0].origin == BOTH
+    # New in the database, never synced: the database made it.
+    assert compare({view: text, proc: "x"}, {view: text}, sync)[0].origin == DATABASE
+    # Changed, never synced: nobody knows.
+    assert compare({proc: "x"}, {proc: "y"}, SyncRecord(None))[0].origin == UNKNOWN
+
+
+def test_commit_leaves_a_teammates_unapplied_object_alone(tmp_path, fake_db):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    assert ".sqlsc/" in (tmp_path / ".gitignore").read_text()
+    view, proc = ObjectKey("view", "dbo", "vSales"), ObjectKey("procedure", "dbo", "usp_New")
+    fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    assert run(tmp_path, "--json", "commit", "-m", "First").exit_code == 0
+
+    # A teammate's commit lands: a new proc the database does not have yet.
+    write_object(tmp_path / "database", proc, "CREATE PROC dbo.usp_New AS SELECT 1;\nGO\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "Teammate adds usp_New")
+    status = json.loads(run(tmp_path, "--json", "status").output)
+    assert status["sides"] == {"to_commit": 0, "to_get": 1, "conflicts": 0, "unknown_side": 0}
+    assert status["changes"][0]["origin"] == REPO
+
+    # Commit must not delete their file; get-latest is what applies it.
+    result = json.loads(run(tmp_path, "--json", "commit").output)
+    assert result["commit"] is None and [h["object"] for h in result["held_back"]] == ["[dbo].[usp_New]"]
+    assert (tmp_path / "database" / "Stored Procedures" / "dbo.usp_New.sql").is_file()
+    # --force commits it as the database sees it (gone).
+    assert json.loads(run(tmp_path, "--json", "commit", "--force").output)["summary"]["deleted"] == 1
+    assert not (tmp_path / "database" / "Stored Procedures" / "dbo.usp_New.sql").exists()
+
+    # Dropped from the database after a sync: that is a real deletion, committed as such.
+    del fake_db[view]
+    status = json.loads(run(tmp_path, "--json", "status").output)
+    assert status["changes"][0]["origin"] == DATABASE
+    assert json.loads(run(tmp_path, "--json", "commit").output)["summary"]["deleted"] == 1
+    assert not (tmp_path / "database" / "Views" / "dbo.vSales.sql").exists()
+
+
+def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypatch):
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    view = ObjectKey("view", "dbo", "vSales")
+    fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    assert run(tmp_path, "script").exit_code == 0  # synced
+    fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 2;\nGO\n"  # edited in the database, not committed
+
+    applied: list[str] = []
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: applied.append(plan) or _no_failures())
+    result = json.loads(run(tmp_path, "--json", "get-latest").output)
+    assert result["steps"] == [] and [k["object"] for k in result["kept"]] == ["[dbo].[vSales]"]
+    assert "changed in the database" in result["kept"][0]["reason"]
+    forced = json.loads(run(tmp_path, "--json", "get-latest", "--force").output)
+    assert [s["object"] for s in forced["steps"]] == ["[dbo].[vSales]"] and forced["kept"] == []
+
+
+def _no_failures():
+    class Result:
+        failed: list = []
+        done: list = []
+        transactional = True
+
+    return Result()
