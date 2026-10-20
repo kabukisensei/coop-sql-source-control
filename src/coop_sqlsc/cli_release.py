@@ -298,7 +298,7 @@ def migrations(ctx: click.Context, target_name: str | None) -> None:
 @click.option("--before", is_flag=True, help="Run it before the structural changes instead of after.")
 @click.pass_obj
 def migrations_add(opts: Opts, name: str, before: bool) -> None:
-    """Create Migrations/<yyyymmddHHMM>_<name>.sql to write the script in."""
+    """Create Migrations/<yyyymmddHHMMSS>_<name>.sql to write the script in."""
     cfg = _load_config(opts)
     path = migrations_mod.new_file(cfg.scripts_dir, name, migrations_mod.BEFORE if before else migrations_mod.AFTER)
     emit(opts, {"command": "migrations add", "path": str(path), "when": "before" if before else "after"})

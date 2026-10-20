@@ -142,8 +142,10 @@ def statements(migration: Migration) -> list[str]:
 
 
 def new_file(root: Path, name: str, when: str = AFTER, now: datetime | None = None) -> Path:
-    """Creates Migrations/<yyyymmddHHMM>_<name>.sql with a short header, and returns it."""
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M")
+    """Creates Migrations/<yyyymmddHHMMSS>_<name>.sql with a short header, and returns it.
+
+    Stamped to the second so two scripts made in a row run in the order they were made."""
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-") or "migration"
     base = root / FOLDER
     base.mkdir(parents=True, exist_ok=True)

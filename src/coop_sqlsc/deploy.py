@@ -316,6 +316,11 @@ def table_changes(key: ObjectKey, db_text: str, repo_text: str, allow_drops: boo
     for col in new.order:
         if col not in old.columns:
             columns.append(f"ALTER TABLE {table} ADD {quote(col)} {new.columns[col]}")
+            if _needs_rows_filled(new.columns[col]):
+                notes.append(
+                    f"column {col} is NOT NULL with no DEFAULT: the ADD fails if the table has rows; "
+                    "give it a DEFAULT, or add it nullable and fill it in a before migration script"
+                )
     for col in old.order:
         if col in new.columns:
             if old.columns[col] != new.columns[col]:
@@ -330,6 +335,12 @@ def table_changes(key: ObjectKey, db_text: str, repo_text: str, allow_drops: boo
     if kept_old != kept_new:
         notes.append("column order differs; ALTER cannot reorder columns, so the order is left as it is")
     return drops + columns + adds, notes
+
+
+def _needs_rows_filled(definition: str) -> bool:
+    """A NOT NULL column without a DEFAULT or IDENTITY cannot be added to a table with rows."""
+    upper = definition.upper()
+    return " NOT NULL" in upper and " DEFAULT " not in upper and " IDENTITY" not in upper and " AS " not in upper
 
 
 def _alter_column(table: str, key: ObjectKey, col: str, old: str, new: str) -> list[str]:

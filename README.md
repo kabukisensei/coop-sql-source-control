@@ -239,7 +239,7 @@ in `Migrations/` next to the object folders, one file each, named so they sort
 in the order they should run:
 
 ```powershell
-sqlsc migrations add backfill-region          # database/Migrations/202610201030_backfill-region.sql
+sqlsc migrations add backfill-region          # database/Migrations/20261020103000_backfill-region.sql
 sqlsc migrations add widen-code --before      # the same, run before the structural changes
 sqlsc migrations -t test                      # which scripts test has run, which are pending
 ```
@@ -279,7 +279,7 @@ The script runs first, the database is read again, and the compare then sees
 
 ```
 database/
-  Migrations/202610201030_backfill-region.sql
+  Migrations/20261020103000_backfill-region.sql
   Security/Schemas/sales.sql
   Tables/sales.Customer.sql
   Views/sales.vCustomerTotals.sql
