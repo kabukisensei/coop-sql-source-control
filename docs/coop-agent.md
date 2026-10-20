@@ -56,7 +56,9 @@ $ coop-sqlsc --json status --target dev
   "folder": "C:\\work\\sales\\database",
   "summary": {"new": 1, "changed": 0, "deleted": 0},
   "sides": {"to_commit": 1, "to_get": 0, "conflicts": 0, "unknown_side": 0},
-  "changes": [{"action": "new", "origin": "database", "type": "view", "schema": "dbo", "name": "vSales", "object": "[dbo].[vSales]", "path": "Views/dbo.vSales.sql"}],
+  "user": "ada@example.com",
+  "changes": [{"action": "new", "origin": "database", "type": "view", "schema": "dbo", "name": "vSales", "object": "[dbo].[vSales]", "path": "Views/dbo.vSales.sql", "locked_by": null, "mine": false}],
+  "locks": [],
   "warnings": []
 }
 ```
@@ -69,3 +71,7 @@ leaves `repo` and `both` objects alone and lists them under `held_back`;
 `get-latest` leaves `database` and `both` objects alone and lists them under
 `kept`. Each entry carries a `reason`. `--force` on either command overrides
 that, so only pass it when the person has chosen a side.
+
+`user` is who sqlsc ran as (git `user.email`, or `--as`); `locked_by` names
+who has an object checked out and `mine` is true when that is this user, so
+"checked out by you" needs no name comparison.

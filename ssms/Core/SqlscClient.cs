@@ -68,6 +68,11 @@ namespace CoopSqlSourceControl.Core
             return Run(token, args.Concat(Message(message)).Concat(objects));
         }
 
+        public Task<CliResult> DataAddAsync(string target, IEnumerable<string> tables, CancellationToken token)
+        {
+            return Run(token, new[] { "data", "add", "--target", target }.Concat(tables));
+        }
+
         public Task<CliResult> LocksAsync(string target, CancellationToken token)
         {
             return Run(token, "locks", "--target", target);

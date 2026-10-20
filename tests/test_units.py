@@ -597,3 +597,32 @@ def _no_failures():
         transactional = True
 
     return Result()
+
+
+def test_status_says_who_you_are_and_which_checkouts_are_yours(tmp_path, fake_db, monkeypatch):
+    # The SSMS window shows "you" on your own checkouts: status names the user it ran
+    # as and flags each change and lock with `mine`, compared case-insensitively.
+    from datetime import datetime
+
+    from coop_sqlsc.locks import Lock
+
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    view = ObjectKey("view", "dbo", "vSales")
+    fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    lock = Lock("repo", view, "Ada@Example.com", "ada", datetime(2026, 10, 19, 12, 0), None)
+
+    class FakeStore:
+        def __init__(self, conn, transactional):
+            pass
+
+        def list(self, repo):
+            return [lock]
+
+    monkeypatch.setattr(cli_mod, "LockStore", FakeStore)
+    mine = json.loads(run(tmp_path, "--json", "status", "--as", "ada@example.com").output)
+    assert mine["user"] == "ada@example.com"
+    assert mine["changes"][0]["locked_by"] == "Ada@Example.com" and mine["changes"][0]["mine"] is True
+    assert mine["locks"][0]["mine"] is True
+
+    theirs = json.loads(run(tmp_path, "--json", "status", "--as", "bob@example.com").output)
+    assert theirs["changes"][0]["mine"] is False and theirs["locks"][0]["mine"] is False

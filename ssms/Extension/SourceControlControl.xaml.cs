@@ -199,8 +199,33 @@ namespace CoopSqlSourceControl
             var warnings = Warnings(result.Json);
             Say((changes.Count == 0
                     ? "The repo matches " + target.Name + "."
-                    : changes.Count + " object(s) differ between " + target.Name + " and the repo.")
+                    : changes.Count + " object(s) differ between " + target.Name + " and the repo" + Sides(changes) + ".")
                 + (warnings.Length > 0 ? " " + warnings : string.Empty));
+        }
+
+        /// <summary>": 2 to commit, 1 to get latest, 1 changed on both sides", from the Changed in column.</summary>
+        private static string Sides(IList<ChangeInfo> changes)
+        {
+            var parts = new List<string>();
+            var toCommit = changes.Count(c => c.Origin == "database");
+            var toGet = changes.Count(c => c.IsFromRepo);
+            var both = changes.Count(c => c.IsConflict);
+            if (toCommit > 0)
+            {
+                parts.Add(toCommit + " to commit");
+            }
+
+            if (toGet > 0)
+            {
+                parts.Add(toGet + " to get latest");
+            }
+
+            if (both > 0)
+            {
+                parts.Add(both + " changed on both sides");
+            }
+
+            return parts.Count == 0 ? string.Empty : ": " + string.Join(", ", parts);
         }
 
         // --- changes tab -----------------------------------------------------------------
@@ -241,9 +266,11 @@ namespace CoopSqlSourceControl
 
             var selected = SelectedChanges;
             var affected = selected.Count > 0 ? selected : (ChangesGrid.ItemsSource as IEnumerable<ChangeInfo> ?? Enumerable.Empty<ChangeInfo>()).ToList();
-            var deletions = affected.Count(c => c.Action == "deleted");
-            // "Deleted" means the repo has the object and the database does not: dropped here,
-            // or a teammate's new object not applied with Get latest yet. Committing removes the file.
+            // "Deleted" means the repo has the object and the database does not. When sqlsc knows
+            // the object was synced here before, that is a drop and the file goes; when it has
+            // never seen it (a teammate's new object), sqlsc leaves it for Get latest. Only the
+            // ones it cannot tell apart need a warning.
+            var deletions = affected.Count(c => c.Action == "deleted" && c.Origin != "repo" && c.Origin != "database");
             var warning = deletions == 0 ? string.Empty
                 : Environment.NewLine + Environment.NewLine + deletions + " of them would delete the object's file from the repo, because "
                     + Target.Name + " does not have it. If it is new from the repo and not applied yet, use Get latest instead.";
@@ -263,6 +290,7 @@ namespace CoopSqlSourceControl
 
             var sha = result.Json.Value<string>("commit");
             var skipped = TargetInfo.Items(result.Json, "skipped").Select(s => s.Value<string>("object") + " (" + s.Value<string>("locked_by") + ")").ToList();
+            var heldBack = TargetInfo.Items(result.Json, "held_back").Select(h => h.Value<string>("object")).ToList();
             await RefreshAsync();
             if (sha != null)
             {
@@ -272,7 +300,44 @@ namespace CoopSqlSourceControl
             var pushed = result.Json.Value<string>("pushed");
             var pushError = result.Json.Value<string>("push_error");
             Say((pushError ?? (sha == null ? "Nothing to commit." : "Committed as " + sha + (pushed != null ? " and pushed " + pushed : string.Empty) + "."))
-                + (skipped.Count > 0 ? " Left for whoever has them checked out: " + string.Join(", ", skipped) + "." : string.Empty));
+                + (skipped.Count > 0 ? " Left for whoever has them checked out: " + string.Join(", ", skipped) + "." : string.Empty)
+                + (heldBack.Count > 0 ? " Left because the repo changed them since your last sync (see Changed in; Get latest applies them): " + string.Join(", ", heldBack) + "." : string.Empty));
+        }
+
+        private async void OnTrackRows(object sender, RoutedEventArgs e)
+        {
+            if (client == null || Target == null)
+            {
+                return;
+            }
+
+            // Tables already shown as changes can be picked; lookup tables usually are not, so ask.
+            var names = Names(SelectedChanges.Where(c => c.Type == "table"));
+            if (names.Count == 0)
+            {
+                var typed = Ask("Track rows", "Tables whose rows to keep in the repo as static data, separated by commas (for example dbo.Status, ref.Country):");
+                names = SplitNames(typed);
+                if (names.Count == 0)
+                {
+                    return;
+                }
+            }
+
+            var result = await RunAsync("Reading the rows…", t => client.DataAddAsync(Target.Name, names, t));
+            if (result == null)
+            {
+                return;
+            }
+
+            var tracked = TargetInfo.Items(result.Json, "tracked").Select(x => x.Value<string>("object")).ToList();
+            await RefreshAsync();
+            Say("Now tracking the rows of " + string.Join(", ", tracked) + ". Commit adds the data file" + (tracked.Count == 1 ? string.Empty : "s") + " to the repo.");
+        }
+
+        private static IList<string> SplitNames(string typed)
+        {
+            return (typed ?? string.Empty).Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(n => n.Trim()).Where(n => n.Length > 0).Distinct().ToList();
         }
 
         private async void OnGetLatest(object sender, RoutedEventArgs e)
@@ -319,10 +384,12 @@ namespace CoopSqlSourceControl
             }
 
             var failed = TargetInfo.Items(result.Json, "failed").Select(f => f.Value<string>("object") + ": " + f.Value<string>("error")).ToList();
+            var kept = TargetInfo.Items(result.Json, "kept").Select(k => k.Value<string>("object")).ToList();
             await RefreshAsync();
-            Say(failed.Count == 0
-                ? "Updated " + target.Name + "."
-                : "Get latest failed, so nothing was changed: " + string.Join("; ", failed));
+            Say((failed.Count == 0
+                    ? "Updated " + target.Name + "."
+                    : "Get latest failed, so nothing was changed: " + string.Join("; ", failed))
+                + (kept.Count > 0 ? " Kept as they are, because " + target.Name + " changed them since your last sync (commit them first): " + string.Join(", ", kept) + "." : string.Empty));
         }
 
         private async void OnCheckout(object sender, RoutedEventArgs e)
@@ -333,20 +400,30 @@ namespace CoopSqlSourceControl
             }
 
             // Objects are checked out before they are edited, when they do not differ yet and
-            // so are not in the grid: with nothing selected, ask for their names.
+            // so are not in the grid: with nothing selected, ask for their names. The note is
+            // what teammates see next to the lock (why, or until when), like Redgate's.
             var names = Names(SelectedChanges);
+            var answers = names.Count == 0
+                ? AskFields("Check out",
+                    "Objects to check out, separated by commas (for example dbo.Customer, sales.vTotals):",
+                    "Note for the team (optional):")
+                : AskFields("Check out " + (names.Count == 1 ? names[0] : names.Count + " objects"), "Note for the team (optional):");
+            if (answers == null)
+            {
+                return;
+            }
+
+            var note = answers[answers.Length - 1];
             if (names.Count == 0)
             {
-                var typed = Ask("Check out", "Objects to check out, separated by commas (for example dbo.Customer, sales.vTotals):");
-                names = (typed ?? string.Empty).Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(n => n.Trim()).Where(n => n.Length > 0).Distinct().ToList();
+                names = SplitNames(answers[0]);
                 if (names.Count == 0)
                 {
                     return;
                 }
             }
 
-            var result = await RunAsync("Checking out…", t => client.CheckoutAsync(Target.Name, names, null, t), acceptFailure: true);
+            var result = await RunAsync("Checking out…", t => client.CheckoutAsync(Target.Name, names, note, t), acceptFailure: true);
             if (result == null)
             {
                 return;
@@ -363,15 +440,32 @@ namespace CoopSqlSourceControl
         /// <summary>A one-line question in a small modal window; null when cancelled.</summary>
         private string Ask(string title, string prompt)
         {
-            var box = new TextBox { Name = "AskBox", MinWidth = 380, Margin = new Thickness(0, 6, 0, 10) };
+            var answers = AskFields(title, prompt);
+            return answers == null ? null : answers[0];
+        }
+
+        /// <summary>One text box per prompt in a small modal window; null when cancelled.
+        /// The boxes carry automation ids AskBox, AskBox2, … so UI tests can find them.</summary>
+        private string[] AskFields(string title, params string[] prompts)
+        {
+            var boxes = new List<TextBox>();
+            var panel = new StackPanel { Margin = new Thickness(12) };
+            for (var i = 0; i < prompts.Length; i++)
+            {
+                var id = i == 0 ? "AskBox" : "AskBox" + (i + 1);
+                var box = new TextBox { Name = id, MinWidth = 380, Margin = new Thickness(0, 6, 0, 10) };
+                System.Windows.Automation.AutomationProperties.SetAutomationId(box, id);
+                System.Windows.Automation.AutomationProperties.SetName(box, prompts[i]);
+                panel.Children.Add(new TextBlock { Text = prompts[i], TextWrapping = TextWrapping.Wrap, MaxWidth = 380 });
+                panel.Children.Add(box);
+                boxes.Add(box);
+            }
+
             var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 70, Margin = new Thickness(0, 0, 6, 0) };
             var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             buttons.Children.Add(ok);
             buttons.Children.Add(cancel);
-            var panel = new StackPanel { Margin = new Thickness(12) };
-            panel.Children.Add(new TextBlock { Text = prompt, TextWrapping = TextWrapping.Wrap, MaxWidth = 380 });
-            panel.Children.Add(box);
             panel.Children.Add(buttons);
             var window = new Window
             {
@@ -383,10 +477,9 @@ namespace CoopSqlSourceControl
                 ShowInTaskbar = false,
                 Owner = Window.GetWindow(this),
             };
-            System.Windows.Automation.AutomationProperties.SetAutomationId(box, "AskBox");
             ok.Click += (s, a) => window.DialogResult = true;
-            window.Loaded += (s, a) => box.Focus();
-            return window.ShowDialog() == true ? box.Text : null;
+            window.Loaded += (s, a) => boxes[0].Focus();
+            return window.ShowDialog() == true ? boxes.Select(b => b.Text).ToArray() : null;
         }
 
         private async void OnCheckinChanges(object sender, RoutedEventArgs e)
@@ -540,7 +633,7 @@ namespace CoopSqlSourceControl
         {
             foreach (var button in new[]
             {
-                RefreshButton, CommitButton, GetLatestButton, DiffButton, CheckoutButton, CheckinButton,
+                RefreshButton, CommitButton, GetLatestButton, DiffButton, CheckoutButton, CheckinButton, TrackRowsButton,
                 LockCheckinButton, UndoCheckoutButton, ForceReleaseButton,
             })
             {
