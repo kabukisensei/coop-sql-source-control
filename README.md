@@ -50,7 +50,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
 | `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`); objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch |
-| `sqlsc get-latest [objects…]` | Changes the database to match the repo; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
+| `sqlsc get-latest [objects…]` | Changes the database to match the repo, running any migration scripts it has not had yet; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
 | `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them; `--no-commit` only releases them |
 | `sqlsc locks` | Lists who has what checked out; `--mine` for yours, `--all-repos` for every repo sharing the lock table |
@@ -60,6 +60,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc data remove tables…` | Stops keeping them (the rows stay in the database) |
 | `sqlsc deploy` | Releases a commit (`--ref`, default `HEAD`) to a database; `--output FILE` writes the script for review, `--confirm NAME` is needed for a protected target |
 | `sqlsc history` | Lists the releases `deploy` has made to a database |
+| `sqlsc migrations` | Lists the hand-written migration scripts and which a database has run (see *Migration scripts*); `migrations add NAME` starts a new one |
 
 Global options: `--json` prints one JSON document (`{"ok": true, …}`, or
 `{"ok": false, "error": {"kind", "message"}}` with exit code 2), `--config PATH`
@@ -228,10 +229,41 @@ by `sqlsc` or by hand from the script in SSMS or sqlcmd, ends by adding a row to
 ran it; `sqlsc history` reads that table. Drops still need `--allow-drops`, and
 changes `ALTER` cannot make safely are still held back with the reason.
 
+## Migration scripts
+
+Most changes need no script: `get-latest` and `deploy` work them out from the
+object files. A few cannot be worked out, or move data as well as structure:
+splitting a column, backfilling a new `NOT NULL` column, renaming a table
+without losing its rows (the things `get-latest` lists as held back). Those go
+in `Migrations/` next to the object folders, one file each, named so they sort
+in the order they should run:
+
+```powershell
+sqlsc migrations add backfill-region          # database/Migrations/202610201030_backfill-region.sql
+sqlsc migrations add widen-code --before      # the same, run before the structural changes
+sqlsc migrations -t test                      # which scripts test has run, which are pending
+```
+
+Every whole update (`get-latest` or `deploy` with no object names) runs the
+scripts the database has not had yet, in file-name order, and records each in
+`sqlsc.Migration` so it never runs twice there; `status` counts the pending
+ones. A script runs after the structural changes by default, where it can rely
+on the new columns and tables. One whose first line is `-- sqlsc: before` runs
+before them, for work the structural change depends on (filling a column before
+it becomes `NOT NULL`); sqlsc reads the database again after the before scripts,
+so the structural changes build on what they did. A review script written with
+`--output` cannot do that, so it says so when before scripts are pending. On
+transactional targets the after scripts share the update's transaction; each
+before script is its own. `commit` takes new and edited scripts along with the
+objects. A script that is edited after a database has run it does not run
+there again; `sqlsc migrations` marks it *edited*, so put the further change
+in a new script.
+
 ## Repo layout
 
 ```
 database/
+  Migrations/202610201030_backfill-region.sql
   Security/Schemas/sales.sql
   Tables/sales.Customer.sql
   Views/sales.vCustomerTotals.sql
@@ -275,6 +307,7 @@ column type, and releases by tag to a protected target.
 2. **Commit and get latest**: `commit` scripts and commits in one step; `get-latest` applies repo changes to a dev database.
 3. **Checkout and check-in**: a shared lock table, `checkout`, `checkin`, `locks`, `unlock`, and an optional edit guard on SQL Server and Azure SQL.
 4. **Deploy and static data**: `deploy` and `history` for test and prod releases, lookup-table rows as `MERGE` scripts.
-5. **SSMS add-in** (this release): a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
+5. **SSMS add-in**: a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
+6. **Migration scripts** (this release): hand-written, run-once scripts around the structural changes.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).

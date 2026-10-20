@@ -30,6 +30,7 @@ TYPE_LABELS: dict[str, str] = {
     "procedure": "Stored procedure",
     "trigger": "Trigger",
     "data": "Static data",
+    "migration": "Migration",  # a Migrations/ script; not an object folder (see migrations.py)
 }
 
 
@@ -43,11 +44,14 @@ class ObjectKey:
     def display(self) -> str:
         if self.type == "schema":
             return f"[{self.name}]"
+        if self.type == "migration":
+            return f"Migrations/{self.name}.sql"
         return f"[{self.schema}].[{self.name}]"
 
     @property
     def sort_key(self) -> tuple[int, str, str]:
-        return (list(OBJECT_TYPES).index(self.type), self.schema.lower(), self.name.lower())
+        order = list(OBJECT_TYPES).index(self.type) if self.type in OBJECT_TYPES else len(OBJECT_TYPES)
+        return (order, self.schema.lower(), self.name.lower())
 
 
 def normalize(text: str) -> str:

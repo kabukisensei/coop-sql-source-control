@@ -14,6 +14,7 @@ from rich.table import Table as RichTable
 
 from . import __version__, git_ops, locks
 from . import data as data_mod
+from . import migrations as migrations_mod
 from .cli import (
     AS_OPTION,
     Opts,
@@ -226,7 +227,83 @@ def deploy(
         header=header,
         footer=record,
         extra={"ref": ref, "commit": commit, "repo": repo},
+        who=who,
+        commit=commit,
     )
+
+
+# --- migrations ------------------------------------------------------------------------------
+
+
+@main.group(invoke_without_command=True)
+@click.option("--target", "-t", "target_name", help="Database to check (default from sqlsc.yml).")
+@click.pass_context
+def migrations(ctx: click.Context, target_name: str | None) -> None:
+    """Hand-written scripts that run once per database, with get-latest and deploy.
+
+    \b
+      sqlsc migrations                      which scripts each database has run
+      sqlsc migrations add backfill-region  a new Migrations/<stamp>_backfill-region.sql
+    A script runs after the structural changes unless its first line is `-- sqlsc: before`.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    opts: Opts = ctx.obj
+    state = _read_state(opts, target_name)
+    pending = {m.id for m in state.pending_migrations()}
+    edited = {m.id for m in migrations_mod.edited(state.migrations, state.applied)}
+    rows = []
+    for m in state.migrations:
+        done = state.applied.get(m.id)
+        rows.append(
+            {
+                **m.to_json(),
+                "state": "pending" if m.id in pending else "edited" if m.id in edited else "applied",
+                **(done.to_json() if done else {"applied_at": None, "applied_by": None}),
+            }
+        )
+    emit(opts, {"command": "migrations", **state.header(), "migrations": rows, "warnings": state.warnings})
+    if opts.as_json:
+        return
+    if not rows:
+        console.print(
+            f"No migration scripts in {escape(str(state.scripts_dir / migrations_mod.FOLDER))}. "
+            "[bold]sqlsc migrations add <name>[/] starts one."
+        )
+        return
+    table = RichTable(show_header=True, header_style="bold", box=None, pad_edge=False)
+    for col in ("Script", "Runs", "State", "Applied (UTC)", "By"):
+        table.add_column(col)
+    for r in rows:
+        style = {"pending": "yellow", "edited": "red", "applied": "green"}[r["state"]]
+        table.add_row(
+            escape(r["id"]),
+            r["when"],
+            f"[{style}]{r['state']}[/]",
+            (r["applied_at"] or "")[:16].replace("T", " "),
+            escape(r["applied_by"] or ""),
+        )
+    console.print(table)
+    if pending:
+        console.print(f"{len(pending)} pending: [bold]sqlsc get-latest[/] runs them on '{escape(state.target.name)}'.")
+    if edited:
+        console.print(
+            f"[red]![/] {len(edited)} edited after running: a database that has run a script never runs it "
+            "again. Put the further change in a new script."
+        )
+
+
+@migrations.command("add")
+@click.argument("name")
+@click.option("--before", is_flag=True, help="Run it before the structural changes instead of after.")
+@click.pass_obj
+def migrations_add(opts: Opts, name: str, before: bool) -> None:
+    """Create Migrations/<yyyymmddHHMM>_<name>.sql to write the script in."""
+    cfg = _load_config(opts)
+    path = migrations_mod.new_file(cfg.scripts_dir, name, migrations_mod.BEFORE if before else migrations_mod.AFTER)
+    emit(opts, {"command": "migrations add", "path": str(path), "when": "before" if before else "after"})
+    if not opts.as_json:
+        console.print(f"[green]✓[/] Created {escape(str(path))}. Write the script there; commit takes it along.")
 
 
 @main.command()
