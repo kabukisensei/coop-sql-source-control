@@ -544,7 +544,8 @@ def run_update(
     if not (result and result.failed):
         plan.steps += (before if only_script else []) + after
     closing = footer(plan) if footer and plan.runnable else []
-    if before and only_script:
+    structural = [s for s in plan.runnable if s.action != "migrate"]
+    if before and only_script and structural:
         header = [
             *(header or plan.script(state.target).splitlines()[:2]),
             f"-- {len(before)} migration script(s) run first. The structural changes below were worked out",
@@ -611,7 +612,10 @@ def run_update(
 
     _print_header(state)
     if not plan.steps and not before:
-        console.print("[green]✓[/] Nothing to do; the database already matches the repo.")
+        if kept:
+            console.print("[green]✓[/] Nothing to apply from the repo.")
+        else:
+            console.print("[green]✓[/] Nothing to do; the database already matches the repo.")
         _print_kept(kept)
         return
     if dry_run:
@@ -636,8 +640,16 @@ def run_update(
         console.print(f"[red]✗[/] {escape(key.display)} failed: {escape(message)}.{undone}")
         sys.exit(1)
     elif result is not None:
-        console.print(f"[green]✓[/] Updated {len(result.done)} object(s).")
-        if remaining:
+        ran = [k for k in result.done if k.type == "migration"]
+        updated = len(result.done) - len(ran)
+        scripts = f" and ran {len(ran)} migration script(s)" if ran else ""
+        console.print(f"[green]✓[/] Updated {updated} object(s){scripts}.")
+        if remaining and ran:
+            console.print(
+                f"[yellow]![/] {len(remaining)} object(s) now differ from the repo, created or changed by the "
+                "scripts: `sqlsc commit` puts them in the repo."
+            )
+        elif remaining:
             console.print(f"[yellow]![/] {len(remaining)} object(s) still differ; run `sqlsc status` to see them.")
     if plan.held_back:
         console.print(f"[yellow]![/] {len(plan.held_back)} change(s) were held back (see notes above).")
@@ -1209,6 +1221,8 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     ]
     # A deploy reads the repo at a commit, not this working copy: no sync record applies.
     sync = SyncRecord.load(cfg.root, target.name) if files is None else SyncRecord(None)
+    if files is None:
+        _ignore_sync_dir(cfg.root)  # repos linked before the sync record existed
     return State(cfg, target, result.objects, folder, warnings, sync=sync, migrations=scripts, applied=applied)
 
 

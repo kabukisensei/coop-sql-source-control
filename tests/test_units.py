@@ -590,10 +590,10 @@ def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypat
     assert [s["object"] for s in forced["steps"]] == ["[dbo].[vSales]"] and forced["kept"] == []
 
 
-def _no_failures():
+def _no_failures(plan=None):
     class Result:
         failed: list = []
-        done: list = []
+        done: list = [s.key for s in plan.steps] if plan else []
         transactional = True
 
     return Result()
@@ -680,6 +680,11 @@ def test_status_text_lists_changes_and_pending_migrations_together(tmp_path, fak
     both = run(tmp_path, "status").output
     assert "dbo" in both and "vSales" in both and "1 migration script(s) have not run" in both
 
+    # A repo linked before the sync record existed still gets .sqlsc/ ignored.
+    (tmp_path / ".gitignore").write_text("*.bak\n")
+    run(tmp_path, "status")
+    assert (tmp_path / ".gitignore").read_text() == "*.bak\n.sqlsc/\n"
+
 
 def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_path, fake_db, monkeypatch):
     run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
@@ -703,12 +708,15 @@ def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_pa
 
     # Run: the before script goes on its own, the database is read again, then the rest.
     plans: list = []
-    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: plans.append(plan) or _no_failures())
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: plans.append(plan) or _no_failures(plan))
     result = json.loads(run(tmp_path, "--json", "get-latest").output)
     assert result["applied"] is True
     assert [[s.key.name for s in p.steps] for p in plans] == [["001_prepare"], ["vSales", "002_backfill"]]
     assert [m["id"] for m in result["migrations"]] == ["001_prepare", "002_backfill"]
     assert [s["object"] for s in result["steps"]][0] == "Migrations/001_prepare.sql"
+
+    text = run(tmp_path, "get-latest").output
+    assert "Updated 1 object(s) and ran 2 migration script(s)." in text
 
     # Once recorded, nothing runs again, and a single object's get-latest never runs scripts.
     from datetime import datetime
