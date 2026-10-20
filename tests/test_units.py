@@ -845,6 +845,28 @@ def test_commit_takes_new_migration_scripts_along(tmp_path, fake_db, monkeypatch
     assert "Add 1 migration script(s)" in _git(tmp_path, "log", "-1", "--format=%s")
 
 
+def test_status_lists_files_that_still_need_committing(tmp_path, fake_db, monkeypatch):
+    # Found in SSMS after Track rows…: the data file matched the database, so status (and
+    # the add-in's "Commit every change (N)") did not count it, yet commit took it along.
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "dev@example.com")
+    _git(tmp_path, "config", "user.name", "Dev")
+    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    assert run(tmp_path, "script").exit_code == 0  # written, not committed
+
+    status = run(tmp_path, "--json", "status", "--exit-code")
+    assert status.exit_code == 1
+    listed = json.loads(status.output)
+    assert [(c["object"], c["action"], c["origin"]) for c in listed["changes"]] == [
+        ("[dbo].[vSales]", "new", "database")
+    ]
+    assert listed["summary"] == {"new": 1, "changed": 0, "deleted": 0}
+
+    assert json.loads(run(tmp_path, "--json", "commit").output)["commit"]
+    assert run(tmp_path, "status", "--exit-code").exit_code == 0
+
+
 def test_a_deploy_with_nothing_to_change_still_records_the_release(tmp_path, fake_db, monkeypatch):
     # Found on the Fabric SQL database: history said "No releases recorded" for a database
     # that was at the released commit, because the record only went in with the changes.

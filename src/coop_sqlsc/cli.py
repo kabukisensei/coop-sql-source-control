@@ -202,7 +202,10 @@ AS_OPTION = click.option(
 def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | None) -> None:
     """Show which objects differ between the database and the repo, and who has them checked out."""
     state = _read_state(opts, target_name)
-    changes = state.changes()
+    differences = state.changes()
+    # Files that already match the database but are not committed yet (from `script`,
+    # `data add` or an applied edit) count too: commit takes them, so status shows them.
+    changes = sorted(differences + _uncommitted(state, {c.key for c in differences}), key=lambda c: c.key.sort_key)
     counts = summarize(changes)
     sides = _sides(changes)
     held, who = _peek_locks(state, as_user)
