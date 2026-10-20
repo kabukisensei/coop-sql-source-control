@@ -552,7 +552,6 @@ def test_plan_orders_creates_and_holds_back_drops():
     assert [s.key for s in plan.held_back] == [gone]
 
 
-
 def test_allow_drops_refuses_what_other_objects_still_use():
     # Found on LocalDB: dropping a column a procedure still read left the update failing half way.
     t = ObjectKey("table", "dbo", "T")

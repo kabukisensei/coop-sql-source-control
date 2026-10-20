@@ -131,9 +131,11 @@ def build_plan(
 ) -> Plan:
     steps: list[Step] = []
     # Objects this plan drops do not count as still using what else it drops.
-    dropping = [
-        c.key for c in changes if c.action == NEW and allow_drops and c.key.type in ("table", *_DROP_WORD)
-    ] if guard_drops else None
+    dropping = (
+        [c.key for c in changes if c.action == NEW and allow_drops and c.key.type in ("table", *_DROP_WORD)]
+        if guard_drops
+        else None
+    )
     for change in changes:
         key = change.key
         if change.action == DELETED:  # only in the repo: create it
