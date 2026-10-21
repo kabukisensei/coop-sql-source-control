@@ -13,7 +13,7 @@ namespace CoopSqlSourceControl
     /// always agree.
     /// </summary>
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-    [InstalledProductRegistration("Coop SQL Source Control", "Source control for SQL Server, Azure SQL and Fabric, through sqlsc.", "1.0.1")]
+    [InstalledProductRegistration("Coop SQL Source Control", "Source control for SQL Server, Azure SQL and Fabric, through sqlsc.", "1.0.2")]
     [ProvideMenuResource("Menus.ctmenu", 1)]
     [ProvideToolWindow(typeof(SourceControlWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057")]
     [Guid(PackageIds.PackageGuidString)]

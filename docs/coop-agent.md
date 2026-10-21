@@ -21,6 +21,11 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
   protected target (prod); `deploy` changes one only with `--confirm <target>`,
   which the agent passes only after the user approves that release. `--dry-run`
   and `--output` on either show the script without running it.
+- `commit` also commits `sqlsc.yml`, `.gitattributes` and `.gitignore` while they
+  are new or changed (listed as `setup_files`), so the first baseline commit links
+  the repo without a shell `git commit`.
+- `schemas` / `exclude_schemas` in `sqlsc.yml` (written by `init --schema` /
+  `--exclude-schema`) narrow every command to part of the database.
 - `data add` and `data remove` only write or delete files under `Data/`.
 - `checkout`, `checkin`, `unlock` and `guard` write only to the `sqlsc` schema
   (the lock table and the guard trigger); `checkin` also makes a git commit.

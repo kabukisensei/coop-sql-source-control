@@ -19,7 +19,7 @@ coop-agent, CI and the SSMS add-in.
 From a release (the `.whl` on the [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)):
 
 ```powershell
-pipx install .\coop_sql_source_control-1.0.1-py3-none-any.whl
+pipx install .\coop_sql_source_control-1.0.2-py3-none-any.whl
 ```
 
 or straight from the repo, which needs a GitHub sign-in:
@@ -45,19 +45,19 @@ sqlsc get-latest                  # apply them to your dev database
 ```
 
 `init` writes `sqlsc.yml` at the repo root and a `.gitattributes` for the
-scripts. Inside a repo that has coop's `.coop/project.yml`, `sqlsc init` with no
+scripts; the first `commit` commits them (and `.gitignore`) with the objects. Inside a repo that has coop's `.coop/project.yml`, `sqlsc init` with no
 options uses the contract's `sql_targets` (dev, test, prod) as they are.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml` |
+| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*) |
 | `sqlsc targets` | Lists the databases the repo can talk to |
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, plus object files written but not committed yet (from `script`, `data add` or an applied edit), which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
-| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`); objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes` and `.gitignore` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch |
 | `sqlsc get-latest [objects…]` | Changes the database to match the repo, running any migration scripts it has not had yet; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
 | `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them; `--no-commit` only releases them |
@@ -128,6 +128,21 @@ host from the Fabric API, signed in the same way, with the contract's
 (`<display name>-<item id>`), which is not its display name. Add `server:` (and,
 for a SQL database, `database:`) in `sqlsc.yml` to skip the lookup. The Fabric system schemas
 `queryinsights` and `_rsc` are never scripted.
+
+## Schemas
+
+By default sqlsc takes the whole database. Two optional lists in `sqlsc.yml`
+narrow it:
+
+```yaml
+schemas: [sales, finance]     # only these schemas
+exclude_schemas: [staging]    # never these; wins over schemas
+```
+
+Names match without regard to case. A schema left out is not scripted,
+compared, applied or listed in `Dependencies.json`, by any command; files
+already in the repo for it stay as they are and are never reported as deleted.
+`sqlsc init --schema sales --exclude-schema staging` writes the same lists.
 
 ## Which side changed
 

@@ -15,6 +15,8 @@ A repo linked to a database has an `sqlsc.yml` at its root:
     locks:                # optional: where checkouts are recorded
       target: shared      # default: the target being worked on
       repo: sales-db      # default: the git origin URL
+    schemas: [sales, finance]           # optional: only these schemas
+    exclude_schemas: [staging]          # optional: never these (wins over schemas)
 
 When the repo also has coop's `.coop/project.yml` (here or in a parent folder),
 its `sql_targets` entries are available by name too. An entry in sqlsc.yml with
@@ -109,6 +111,17 @@ class Target:
     trust_server_certificate: bool = False
     protected: bool = False
     source: str = CONFIG_NAME
+    # From sqlsc.yml's schemas / exclude_schemas, lowercased: SQL Server's
+    # default collation compares names without case.
+    include_schemas: frozenset[str] = frozenset()
+    ignore_schemas: frozenset[str] = frozenset()
+
+    def keeps_schema(self, schema: str) -> bool:
+        """False for a schema sqlsc.yml leaves out: it is neither scripted, compared nor applied."""
+        name = schema.lower()
+        if name in self.ignore_schemas:
+            return False
+        return not self.include_schemas or name in self.include_schemas
 
     @property
     def caps(self) -> dict[str, Any]:
@@ -142,6 +155,8 @@ class Config:
     coop_tenant_id: str = ""
     lock_target: str = ""
     lock_repo: str = ""
+    include_schemas: frozenset[str] = frozenset()
+    ignore_schemas: frozenset[str] = frozenset()
 
     @property
     def root(self) -> Path:
@@ -174,7 +189,10 @@ class Config:
             if own and not base
             else ("coop project.yml" if base and not own else f"coop project.yml + {CONFIG_NAME}")
         )
-        return build_target(chosen, merged, source=source)
+        target = build_target(chosen, merged, source=source)
+        target.include_schemas = self.include_schemas
+        target.ignore_schemas = self.ignore_schemas
+        return target
 
 
 def build_target(name: str, raw: dict[str, Any], *, source: str = CONFIG_NAME) -> Target:
@@ -276,6 +294,8 @@ def load(start: Path | None = None, *, config_path: Path | None = None) -> Confi
     locks = _mapping(raw.get("locks"), f"`locks` in {path.name}")
     config.lock_target = _text(locks.get("target"))
     config.lock_repo = _text(locks.get("repo"))
+    config.include_schemas = _schema_list(raw.get("schemas"), f"`schemas` in {path.name}")
+    config.ignore_schemas = _schema_list(raw.get("exclude_schemas"), f"`exclude_schemas` in {path.name}")
     coop = find_coop_contract(path.parent)
     if coop is not None:
         contract = _read_yaml(coop)
@@ -290,12 +310,21 @@ def load(start: Path | None = None, *, config_path: Path | None = None) -> Confi
     return config
 
 
-def write_new(path: Path, *, folder: str, target: str, target_entry: dict[str, Any] | None) -> None:
+def write_new(
+    path: Path,
+    *,
+    folder: str,
+    target: str,
+    target_entry: dict[str, Any] | None,
+    filters: dict[str, list[str]] | None = None,
+) -> None:
     lines = [
         "# coop-sql-source-control: links this repo to a database.",
         f"folder: {folder}",
         f"target: {target}",
     ]
+    for key, names in (filters or {}).items():
+        lines.append(f"{key}: {_yaml_scalar(list(names))}")
     if target_entry:
         lines.append("targets:")
         lines.append(f"  {target}:")
@@ -332,6 +361,16 @@ def _mapping(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError(f"{what} should be a mapping.")
     return value
+
+
+def _schema_list(value: Any, what: str) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise ConfigError(f"{what} should be a list of schema names, like [sales, finance].")
+    return frozenset(v.strip().lower() for v in value)
 
 
 def _text(value: Any) -> str:
