@@ -16,7 +16,11 @@ class GitError(Exception):
 
 def _git(cwd: Path, *args: str) -> str:
     try:
-        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+        # git writes paths and messages as UTF-8 whatever the console's code page (a
+        # Windows cp1252 locale would read "Café" wrong), so never decode by locale.
+        done = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+        )
     except FileNotFoundError as exc:
         raise GitError("git is not installed or not on PATH.") from exc
     if done.returncode != 0:
@@ -104,10 +108,27 @@ def read_tree(root: Path, commit: str, folder: Path) -> dict[str, str]:
     """Every .sql file under folder as it was in commit: {path relative to folder: text}."""
     prefix = folder.resolve().relative_to(root.resolve()).as_posix()
     prefix = "" if prefix == "." else prefix + "/"
-    listing = _git(root, "ls-tree", "-r", "-z", "--name-only", commit, "--", prefix or ".")
+    try:
+        listed = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--name-only", commit, "--", prefix or "."],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git is not installed or not on PATH.") from exc
+    if listed.returncode != 0:
+        raise GitError(f"git ls-tree failed: {_reason(listed.stderr.decode('utf-8', 'replace'))}")
+    try:
+        listing = listed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GitError(f"a file name in {commit[:12]} is not UTF-8; rename it and commit again.") from exc
     names = [n for n in listing.split("\0") if n.lower().endswith(".sql") and n.startswith(prefix)]
     if not names:
         return {}
+    odd = [n for n in names if "\n" in n]
+    if odd:
+        raise GitError(f"{odd[0]!r} has a line break in its name; rename it and commit again.")
     request = "".join(f"{commit}:{name}\n" for name in names).encode("utf-8")
     try:
         done = subprocess.run(["git", "cat-file", "--batch"], cwd=root, input=request, capture_output=True, check=False)
@@ -122,7 +143,9 @@ def read_tree(root: Path, commit: str, folder: Path) -> dict[str, str]:
         header = out[pos:end].decode("utf-8", "replace").split()
         pos = end + 1
         if len(header) < 3 or header[1] != "blob":
-            continue
+            # A release read without one of its files would plan that object as gone
+            # (a DROP with --allow-drops): stop instead of reading on.
+            raise GitError(f"git could not read {name} in {commit[:12]} ({' '.join(header) or 'no answer'}).")
         size = int(header[2])
         files[name[len(prefix) :]] = out[pos : pos + size].decode("utf-8-sig", "replace")
         pos += size + 1

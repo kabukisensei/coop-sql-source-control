@@ -283,6 +283,12 @@ def deploy(
     )
 
 
+def _migration_state(mid: str, pending: set[str], edited: set[str], history_unknown: bool) -> str:
+    if history_unknown:
+        return "unknown"  # sqlsc.Migration could not be read (the warning says why)
+    return "pending" if mid in pending else "edited" if mid in edited else "applied"
+
+
 # --- migrations ------------------------------------------------------------------------------
 
 
@@ -309,7 +315,7 @@ def migrations(ctx: click.Context, target_name: str | None) -> None:
         rows.append(
             {
                 **m.to_json(),
-                "state": "pending" if m.id in pending else "edited" if m.id in edited else "applied",
+                "state": _migration_state(m.id, pending, edited, state.history_error is not None),
                 **(done.to_json() if done else {"applied_at": None, "applied_by": None}),
             }
         )
@@ -326,7 +332,7 @@ def migrations(ctx: click.Context, target_name: str | None) -> None:
     for col in ("Script", "Runs", "State", "Applied (UTC)", "By"):
         table.add_column(col)
     for r in rows:
-        style = {"pending": "yellow", "edited": "red", "applied": "green"}[r["state"]]
+        style = {"pending": "yellow", "edited": "red", "applied": "green", "unknown": "red"}[r["state"]]
         table.add_row(
             escape(r["id"]),
             r["when"],

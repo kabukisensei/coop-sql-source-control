@@ -159,7 +159,9 @@ brings it up to date, so nothing has to be run to start it.
 `status` then shows a *Changed in* column: **Database** (commit it), **Repo**
 (get it with `get-latest`) or **Both** (changed on both sides since the last
 sync: `diff` it, then `commit --force` takes the database's version or
-`get-latest --force` the repo's). `commit` leaves Repo and Both objects alone,
+`get-latest --force` the repo's). An object dropped on one side and edited on
+the other since the last sync is **Both** too, never a plain deletion. `commit`
+leaves Repo and Both objects alone,
 and `get-latest` leaves Database and Both objects alone, each saying why; in
 `--json` they are listed under `held_back` and `kept`. An object never seen in
 sync (a fresh clone, or a difference older than the record) has no side, and
@@ -179,6 +181,8 @@ both commands treat it the way they always did.
   constraint SQL Server named itself) are listed as held back, with the reason; everything else runs.
 - On SQL Server, Azure SQL and Fabric SQL database the whole update is one transaction: if any
   statement fails, nothing changes. Fabric Warehouse and Lakehouse run the statements one by one.
+- A module scripted with `QUOTED_IDENTIFIER` or `ANSI_NULLS` off turns the option back on after
+  itself, so the objects after it are created with their own settings.
 - Targets named `prod`, `production`, `prd` or `live`, or marked `protected: true`, are never
   changed by `get-latest`; `--output` still writes the script for review.
 - Column order is not compared: `ALTER TABLE` can only add a column at the end, so a column placed
@@ -202,7 +206,10 @@ need `locks: target:`. The `sqlsc` schema is never scripted or compared.
 
 - `status` shows who has each changed object checked out.
 - `commit` leaves objects someone else has checked out for them to check in
-  (`--force` commits them anyway); `checkin` commits only your own.
+  (`--force` commits them anyway); `checkin` commits only your own. An object
+  `checkin` cannot commit (the repo changed it too since your last sync) stays
+  checked out, listed under `held_back`, and `checkin` exits 1; `--no-commit`
+  still releases everything.
 - Checking out the same object twice is fine; checking out someone else's fails
   with their name, when they took it and their note, and exits 1.
 - An agent working for you checks out as `<agent>:<you>` (coop-agent uses
@@ -260,7 +267,9 @@ or `protected: true`) need `--confirm` with the target's name. Every release, ru
 by `sqlsc` or by hand from the script in SSMS or sqlcmd, ends by adding a row to
 `sqlsc.Deployment` (even one with nothing left to change, so the history says
 what was released) with the commit, the ref, who prepared it and the login that
-ran it; `sqlsc history` reads that table. Drops still need `--allow-drops`, and
+ran it; `sqlsc history` reads that table. On transactional targets that row is
+part of the release's transaction: a release that cannot be recorded is rolled
+back. Drops still need `--allow-drops`, and
 changes `ALTER` cannot make safely are still held back with the reason.
 
 ## Migration scripts
@@ -291,7 +300,10 @@ transactional targets the after scripts share the update's transaction; each
 before script is its own. `commit` takes new and edited scripts along with the
 objects. A script that is edited after a database has run it does not run
 there again; `sqlsc migrations` marks it *edited*, so put the further change
-in a new script.
+in a new script. When `sqlsc.Migration` exists but cannot be read (no SELECT
+permission, a dropped connection), a whole update stops before changing
+anything, since it cannot tell which scripts already ran; `status` reports
+`history_unknown` and `sqlsc migrations` marks the scripts *unknown*.
 
 Renames are a migration too. Without one, renaming `dbo.Customer` to
 `dbo.Client` reads as a new table and a deleted one, and `get-latest` would

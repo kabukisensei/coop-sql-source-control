@@ -88,11 +88,17 @@ class SyncRecord:
         last = self.hashes.get(key)
         if db_text is None:  # in the repo only
             # Never seen matching here: a teammate's new object, not applied yet.
-            # Seen before: it was dropped from this database.
-            return DATABASE if last is not None else REPO
+            # Seen before: it was dropped from this database, unless the file moved
+            # on since too; then a drop and an edit meet, and neither side wins.
+            if last is None:
+                return REPO
+            return DATABASE if digest(file_text or "") == last else BOTH
         if file_text is None:  # in the database only
-            # Seen before: the repo removed it. Never seen: new in the database.
-            return REPO if last is not None else DATABASE
+            # Seen before: the repo removed it (unless the database changed it since:
+            # both moved). Never seen: new in the database.
+            if last is None:
+                return DATABASE
+            return REPO if digest(db_text) == last else BOTH
         if last is None:
             return UNKNOWN
         file_same, db_same = digest(file_text) == last, digest(db_text) == last

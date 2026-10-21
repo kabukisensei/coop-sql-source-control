@@ -119,7 +119,7 @@ def migration_steps(pending: list[Migration], who: str, commit: str | None) -> l
                 [f"runs once, {migration.when} the structural changes"],
             )
         )
-    return steps
+    return [_restore_set_options(s) for s in steps]
 
 
 # Targets whose sys.sql_expression_dependencies says what still reads a column or
@@ -145,7 +145,24 @@ def build_plan(
             steps.append(_drop_step(key, allow_drops, dropping))
         elif change.action == CHANGED:
             steps.append(_change_step(key, change.db_text or "", change.file_text or "", allow_drops, dropping))
-    return Plan(steps)
+    return Plan([_restore_set_options(s) for s in steps])
+
+
+# A module scripted with QUOTED_IDENTIFIER or ANSI_NULLS off starts with that SET batch.
+# The setting lasts for the rest of the connection, so every object created after it
+# would be stored with it off too (a "Name" in double quotes turning into a string).
+_SET_OFF = re.compile(r"^SET\s+(QUOTED_IDENTIFIER|ANSI_NULLS)\s+OFF\s*;?$", re.IGNORECASE)
+
+
+def _restore_set_options(step: Step) -> Step:
+    """Puts back the default (ON) after a step that turned an option off, also when the
+    step fails part way (cleanup), so the next step runs as its own script says."""
+    off = [m.group(1).upper() for s in step.statements if (m := _SET_OFF.match(s.strip()))]
+    if off:
+        restore = [f"SET {option} ON" for option in dict.fromkeys(off)]
+        step.statements = [*step.statements, *restore]
+        step.cleanup = [*step.cleanup, *restore]
+    return step
 
 
 # --- creates and drops ----------------------------------------------------------------
@@ -507,11 +524,17 @@ class ApplyResult:
     transactional: bool
 
 
-def apply(conn: Any, plan: Plan, target: Target) -> ApplyResult:
+# Where a failed release record is reported (see apply's `closing`).
+HISTORY_KEY = ObjectKey("table", "sqlsc", "Deployment")
+
+
+def apply(conn: Any, plan: Plan, target: Target, closing: list[str] | None = None) -> ApplyResult:
     """Runs the plan. On SQL Server and Azure SQL it is one transaction: all or nothing.
 
     Code objects that read each other (a view on a view) are retried in later
     passes until no more succeed, so their order in the repo does not matter.
+    `closing` (a deploy's sqlsc.Deployment row) runs last, inside the same
+    transaction: a release that cannot be recorded is rolled back with it.
     """
     transactional = target.kind in _TRANSACTIONAL
     cur = conn.cursor()
@@ -545,6 +568,11 @@ def apply(conn: Any, plan: Plan, target: Target) -> ApplyResult:
                     step, message = deferred[0]
                     raise StepFailed(step.key, message)
                 pending = [s for s, _ in deferred]
+        for statement in closing or []:
+            try:
+                cur.execute(statement)
+            except Exception as exc:  # pyodbc.Error
+                raise StepFailed(HISTORY_KEY, f"the release was not recorded: {_first_line(exc)}") from exc
         if transactional:
             conn.commit()
     except StepFailed as exc:

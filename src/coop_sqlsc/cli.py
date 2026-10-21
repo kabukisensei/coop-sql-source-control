@@ -253,6 +253,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
             "migrations": {
                 "pending": [m.to_json() for m in pending],
                 "edited": [m.to_json() for m in migrations_mod.edited(state.migrations, state.applied)],
+                "history_unknown": state.history_error is not None,
             },
             "warnings": state.warnings,
         },
@@ -560,6 +561,15 @@ def run_update(
     names given): the "before" ones first, after which the database is read again so
     the structural changes build on what they did; the "after" ones at the end."""
     only_script = dry_run or output is not None
+    if state.history_error and state.migrations and not objects:
+        # Running them all again could repeat a backfill: stop before anything runs or is written.
+        fail(
+            opts,
+            "history",
+            f"{state.history_error}. Without it sqlsc cannot tell which migration scripts already ran "
+            f"on '{state.target.name}', so {command} stopped before changing anything. Fix the access "
+            "or connection and run it again (naming objects updates just those, without migrations).",
+        )
     who = who or locks.current_user(state.config.root)
     recorded = False  # a footer run on its own, with no changes (a no-op deploy)
     pending = state.pending_migrations() if not objects else []
@@ -611,12 +621,8 @@ def run_update(
                 conn = open_connection(state.target)
                 try:
                     done_before = result.done if result else []
-                    result = apply(conn, plan, state.target)
+                    result = apply(conn, plan, state.target, closing)
                     result.done = done_before + result.done
-                    if closing and not result.failed:
-                        cur = conn.cursor()
-                        for statement in closing:
-                            cur.execute(statement)
                     after = _in_scope(state.target, read_database(conn, state.target).objects)
                     tracked = [k for k in state.folder if k.type == "data"]
                     _read_static_data(conn, state.target, tracked, after)
@@ -632,15 +638,15 @@ def run_update(
         try:
             conn = open_connection(state.target)
             try:
-                cur = conn.cursor()
-                for statement in closing:
-                    cur.execute(statement)
+                done_before = result.done if result else []
+                result = apply(conn, Plan([]), state.target, closing)
+                result.done = done_before + result.done
             finally:
                 conn.close()
         except (ConfigError, ConnectError) as exc:
             fail(opts, "connect", str(exc))
             raise
-        recorded = True
+        recorded = not result.failed
 
     payload: dict[str, Any] = {
         "command": command,
@@ -662,6 +668,9 @@ def run_update(
     if result is not None:
         payload["failed"] = [{"object": k.display, "error": m} for k, m in result.failed]
         payload["transaction"] = result.transactional
+        # What ran and stays, even when something failed: "before" migration scripts
+        # commit on their own, and a target without transactions keeps what ran.
+        payload["done"] = [k.display for k in result.done]
         payload["still_different"] = [c.to_json() for c in remaining]
     if opts.as_json:
         sys.stdout.write(json.dumps({"ok": not (result and result.failed), **payload}, indent=2) + "\n")
@@ -670,7 +679,7 @@ def run_update(
         return
 
     _print_header(state)
-    if not plan.steps and not before:
+    if not plan.steps and not before and not (result and result.failed):
         if kept:
             console.print("[green]✓[/] Nothing to apply from the repo.")
         else:
@@ -697,9 +706,15 @@ def run_update(
         console.print("Dry run: nothing was run.")
     elif result is not None and result.failed:
         key, message = result.failed[0]
-        undone = " Every change was rolled back." if result.transactional else ""
+        undone = ""
+        if result.transactional:
+            undone = " The rest was rolled back." if result.done else " Every change was rolled back."
         # SQL Server's own messages end with a period already.
         console.print(f"[red]✗[/] {escape(key.display)} failed: {escape(message.rstrip().rstrip('.'))}.{undone}")
+        if result.done:
+            kept_note = "committed before the rest" if result.transactional else "not undone"
+            names = ", ".join(k.display for k in result.done)
+            console.print(f"[yellow]![/] Already {kept_note}: {escape(names)}.")
         sys.exit(1)
     elif result is not None:
         ran = [k for k in result.done if k.type == "migration"]
@@ -840,6 +855,7 @@ def checkin(
         keys = [lock.key for lock in chosen]
         sha = branch = None
         changes: list[Change] = []
+        held_back: list[Change] = []
         state = None
         if keys and not no_commit:
             state = _read_state(opts, target.name)
@@ -849,10 +865,14 @@ def checkin(
             changes = [c for c in differences + pending if c.key in wanted]
             held_back = [c for c in changes if not c.from_database]
             changes = [c for c in changes if c.from_database]
-            for change in held_back:
-                state.warnings.append(f"Left {change.key.display} out of the commit: {_hold_reason(change)}")
             sha, branch = _commit_changes(opts, state, changes, message, push)
-        released, _ = _guarded(opts, lambda: session.store.release(keys, repo=session.repo, who=session.who))
+        # What was held back is not in git yet: it stays checked out, so nobody else
+        # edits it while the conflict is sorted out. --no-commit releases on purpose.
+        keeping = {c.key for c in held_back}
+        to_release = [k for k in keys if k not in keeping]
+        released: list[ObjectKey] = []
+        if to_release:
+            released, _ = _guarded(opts, lambda: session.store.release(to_release, repo=session.repo, who=session.who))
     payload = {
         "command": "checkin",
         **session.header(),
@@ -861,10 +881,12 @@ def checkin(
         "push_error": state.push_error if state is not None else None,
         "files": [c.to_json() for c in changes],
         "released": [_key_json(k) for k in released],
+        "held_back": [{**c.to_json(), "reason": _hold_reason(c)} for c in held_back],
         "not_checked_out": list(unknown),
+        "warnings": state.warnings if state is not None else [],
     }
     if opts.as_json:
-        sys.stdout.write(json.dumps({"ok": not unknown, **payload}, indent=2) + "\n")
+        sys.stdout.write(json.dumps({"ok": not unknown and not held_back, **payload}, indent=2) + "\n")
     else:
         if not keys and not unknown:
             console.print(f"Nothing to check in: {escape(session.who)} has nothing checked out.")
@@ -879,11 +901,16 @@ def checkin(
             console.print("[dim]The checked-out objects match the repo; nothing to commit.[/]")
         for key in released:
             console.print(f"[green]✓[/] Released {escape(key.display)}")
+        for change in held_back:
+            console.print(
+                f"[yellow]![/] Kept {escape(change.key.display)} checked out, not committed: "
+                f"{escape(_hold_reason(change))}"
+            )
         for name in unknown:
             console.print(f"[yellow]![/] {escape(name)} is not checked out by {escape(session.who)}.")
         if state is not None:
             _print_warnings(state.warnings)
-    if unknown:
+    if unknown or held_back:
         sys.exit(1)
 
 
@@ -1206,13 +1233,16 @@ class State:
     # Migrations/ scripts in the repo, and the ones sqlsc.Migration says the target has run.
     migrations: list[Migration] = field(default_factory=list)
     applied: dict[str, Applied] = field(default_factory=dict)
+    # Why sqlsc.Migration could not be read: then nobody knows which scripts have run,
+    # so none is pending and a whole update refuses to start (see run_update).
+    history_error: str | None = None
     # Dependencies.json as the database would write it now, when the repo tracks it
     # (see dependencies.py); None when it is not tracked or could not be read.
     dependencies: str | None = None
 
     def pending_migrations(self) -> list[Migration]:
-        if not self.target.caps["tables"]:
-            return []  # nowhere to record them (a Lakehouse); the warning is on state
+        if not self.target.caps["tables"] or self.history_error:
+            return []  # nowhere to record them (a Lakehouse), or no way to tell; the warning is on state
         return migrations_mod.pending(self.migrations, self.applied)
 
     @property
@@ -1249,14 +1279,11 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     scripts = migrations_mod.read_folder(cfg.scripts_dir) if files is None else migrations_mod.from_files(files)
     warnings: list[str] = []
     applied: dict[str, Applied] = {}
+    history_error: str | None = None
     dependencies: str | None = None
-    # Files for object types this platform cannot hold are left alone, never
-    # reported as deleted (a Lakehouse's tables, a Warehouse's triggers).
-    skipped = {t for t, cap in (("table", "tables"), ("trigger", "triggers")) if not target.caps[cap]}
-    if "table" in skipped:
-        skipped.add("data")
+    if not target.caps["tables"]:
         warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
-    folder = {k: v for k, v in folder.items() if k.type not in skipped and in_scope(target, schema_of(k))}
+    folder = {k: v for k, v in folder.items() if _tracks(target, k)}
     spinner = nullcontext() if opts.as_json else err_console.status(f"Reading {target.label} '{target.name}'…")
     try:
         with spinner:
@@ -1275,8 +1302,9 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
                 if scripts and target.caps["tables"]:
                     try:
                         applied = migrations_mod.read_applied(conn)
-                    except Exception as exc:  # pyodbc.Error: say so, and treat every script as pending
-                        warnings.append(f"sqlsc.Migration could not be read: {_first_error_line(exc)}")
+                    except Exception as exc:  # pyodbc.Error: what has run here is unknown, not "nothing"
+                        history_error = f"sqlsc.Migration could not be read: {_first_error_line(exc)}"
+                        warnings.append(history_error)
                 elif scripts:
                     warnings.append(f"Migration scripts are skipped: {target.label} cannot hold sqlsc.Migration.")
             finally:
@@ -1307,8 +1335,19 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         sync=sync,
         migrations=scripts,
         applied=applied,
+        history_error=history_error,
         dependencies=dependencies,
     )
+
+
+def _tracks(target: config_mod.Target, key: ObjectKey) -> bool:
+    """Whether sqlsc owns this object's file for the target. Files for object types the
+    platform cannot hold (a Lakehouse's tables, a Warehouse's triggers) and for schemas
+    out of scope are left alone, never reported as new, changed or deleted."""
+    skipped = {t for t, cap in (("table", "tables"), ("trigger", "triggers")) if not target.caps[cap]}
+    if "table" in skipped:
+        skipped.add("data")
+    return key.type not in skipped and in_scope(target, schema_of(key))
 
 
 def _in_scope(target: config_mod.Target, objects: dict[ObjectKey, str]) -> dict[ObjectKey, str]:
@@ -1358,12 +1397,23 @@ def _side_note(change: Change) -> str:
     if change.origin == REPO:
         return "in the repo, not applied here yet" if change.action == DELETED else "changed in the repo"
     if change.origin == BOTH:
-        return "changed in the database and in the repo"
+        return _both_text(change).removesuffix(" since your last sync")
     return "not seen in sync before"
+
+
+def _both_text(change: Change) -> str:
+    """A conflict, said the way it happened: two edits, or a drop meeting an edit."""
+    if change.action == DELETED:
+        return "dropped from the database and changed in the repo since your last sync"
+    if change.action == NEW:
+        return "changed in the database and deleted from the repo since your last sync"
+    return "changed in the database and in the repo since your last sync"
 
 
 def _hold_reason(change: Change) -> str:
     """Why commit leaves an object alone."""
+    if change.origin == BOTH and change.action != CHANGED:
+        return f"{_both_text(change)}; diff it, then --force to commit the database's side"
     if change.origin == BOTH:
         return (
             "changed in the database and in the repo since your last sync; "
@@ -1381,6 +1431,8 @@ def _hold_reason(change: Change) -> str:
 
 def _keep_reason(change: Change) -> str:
     """Why get-latest leaves an object alone."""
+    if change.origin == BOTH and change.action != CHANGED:
+        return f"{_both_text(change)}; diff it, then --force (with --allow-drops to drop) to apply the repo's side"
     if change.origin == BOTH:
         return (
             "changed in the database and in the repo since your last sync; "
@@ -1481,8 +1533,8 @@ def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
     found: list[Change] = []
     for rel, how in dirty.items():
         key = key_for_path(rel)
-        if key is None or key in differing:
-            continue
+        if key is None or key in differing or not _tracks(state.target, key):
+            continue  # an out-of-scope file, even a deleted one, stays as git has it
         if how == "deleted":
             found.append(Change(key, DELETED, None, None, DATABASE))
         elif key in state.folder:
