@@ -17,10 +17,10 @@ from . import __version__, git_ops, locks
 from . import data as data_mod
 from . import dependencies as deps_mod
 from . import migrations as migrations_mod
-from .catalog import platform_schemas
 from .cli import (
     AS_OPTION,
     Opts,
+    _dependencies,
     _first_error_line,
     _key_json,
     _load_config,
@@ -119,7 +119,7 @@ def dependencies(opts: Opts, target_name: str | None) -> None:
         fail(opts, "connect", str(exc))
         raise
     try:
-        found = deps_mod.read(conn, platform_schemas(target))
+        found = _dependencies(conn, target)
     except Exception as exc:  # pyodbc.Error: no sys.sql_expression_dependencies here
         fail(
             opts,

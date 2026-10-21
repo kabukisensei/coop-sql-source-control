@@ -49,6 +49,17 @@ def platform_schemas(target: Target) -> set[str]:
     return _FABRIC_SYSTEM_SCHEMAS if target.kind.startswith("fabric_") else set()
 
 
+def in_scope(target: Target, schema: str) -> bool:
+    """Whether objects in this schema are ours: not the platform's, and not left out by
+    sqlsc.yml's schemas / exclude_schemas. Out of scope is never scripted, compared
+    or applied; files for it stay in the repo untouched."""
+    return schema not in platform_schemas(target) and target.keeps_schema(schema)
+
+
+def schema_of(key: ObjectKey) -> str:
+    return key.name if key.type == "schema" else key.schema
+
+
 _MODULE_TYPES = {"V": "view", "P": "procedure", "FN": "function", "IF": "function", "TF": "function", "TR": "trigger"}
 
 OBJECTS_SQL = """
@@ -160,9 +171,8 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
     collation_rows = rows(COLLATION_SQL, "collation")
     collation = collation_rows[0][0] if collation_rows else None
 
-    skip_schemas = platform_schemas(target)
     for name, owner in rows(SCHEMAS_SQL, "schemas"):
-        if name in skip_schemas:
+        if not in_scope(target, name):
             continue
         result.objects[ObjectKey("schema", "", name)] = script_schema(name, owner)
 
@@ -170,7 +180,7 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
     tables: dict[int, Table] = {}
     module_keys: dict[int, ObjectKey] = {}
     for object_id, schema, name, otype in objects:
-        if (schema == "dbo" and name in _DIAGRAM_OBJECTS) or schema in skip_schemas:
+        if (schema == "dbo" and name in _DIAGRAM_OBJECTS) or not in_scope(target, schema):
             continue
         if otype == "U":
             if caps["tables"]:

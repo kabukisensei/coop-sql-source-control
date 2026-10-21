@@ -30,7 +30,7 @@ from . import config as config_mod
 from . import data as data_mod
 from . import dependencies as deps_mod
 from . import migrations as migrations_mod
-from .catalog import platform_schemas, read_database
+from .catalog import in_scope, platform_schemas, read_database, schema_of
 from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
@@ -52,6 +52,20 @@ ACTION_WORDS = {NEW: "New", CHANGED: "Changed", DELETED: "Deleted"}
 class Opts:
     as_json: bool
     config_path: Path | None
+
+
+def _printable_output() -> None:
+    """A Windows console or pipe on a legacy code page (cp1252) cannot encode the marks
+    sqlsc prints (✓, ✗, …); Python then raises instead of printing. Such a stream shows
+    "?" for what it cannot encode; the JSON output is ASCII and never needs it."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        try:
+            "✓✗…→".encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(errors="replace")
 
 
 def emit(opts: Opts, payload: dict[str, Any]) -> None:
@@ -91,6 +105,7 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
       sqlsc checkout X     tell the team you are editing X
       sqlsc checkin        commit what you checked out and release it
     """
+    _printable_output()
     ctx.obj = Opts(as_json=as_json, config_path=config_path)
 
 
@@ -108,6 +123,10 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
 @click.option("--auth", type=click.Choice(config_mod.AUTH_MODES), help="How to sign in (default depends on kind).")
 @click.option("--user", help="User name for SQL authentication.")
 @click.option("--trust-server-certificate", is_flag=True, help="Accept a self-signed certificate (local dev only).")
+@click.option(
+    "--schema", "schemas", multiple=True, help="Keep only this schema (repeat for more). Default: the whole database."
+)
+@click.option("--exclude-schema", "exclude_schemas", multiple=True, help="Leave this schema out (repeat for more).")
 @click.option("--force", is_flag=True, help="Overwrite an existing sqlsc.yml.")
 @click.pass_obj
 def init(
@@ -120,6 +139,8 @@ def init(
     auth: str | None,
     user: str | None,
     trust_server_certificate: bool,
+    schemas: tuple[str, ...],
+    exclude_schemas: tuple[str, ...],
     force: bool,
 ) -> None:
     """Link this repo to a database by writing sqlsc.yml."""
@@ -144,12 +165,13 @@ def init(
                 "Name the database with --kind, --server and --database "
                 "(or run this inside a repo that has coop's .coop/project.yml).",
             )
-    config_mod.write_new(path, folder=folder, target=target_name, target_entry=entry)
+    filters = {k: list(v) for k, v in (("schemas", schemas), ("exclude_schemas", exclude_schemas)) if v}
+    config_mod.write_new(path, folder=folder, target=target_name, target_entry=entry, filters=filters)
     attributes = path.parent / ".gitattributes"
     if not attributes.exists():
         attributes.write_text("*.sql text diff\n", encoding="utf-8")
     _ignore_sync_dir(path.parent)
-    emit(opts, {"command": "init", "config": str(path), "folder": folder, "target": target_name})
+    emit(opts, {"command": "init", "config": str(path), "folder": folder, "target": target_name, **filters})
     if not opts.as_json:
         console.print(f"[green]✓[/] Wrote {escape(str(path))}")
         console.print(f"  Object scripts will live in [bold]{escape(folder)}/[/]. Next: [bold]sqlsc status[/]")
@@ -371,6 +393,7 @@ def commit(
         {
             "command": "commit",
             "migrations": scripts,
+            "setup_files": state.setup_files,
             **state.header(),
             "commit": sha,
             "pushed": branch,
@@ -391,6 +414,8 @@ def commit(
         _print_changes(changes)
         console.print()
         scripted = f" and {len(scripts)} migration script(s)" if scripts else ""
+        if state.setup_files:
+            scripted += f" with {', '.join(state.setup_files)}"
         console.print(
             f"[green]✓[/] Committed {len(changes)} object(s){scripted} as [bold]{sha}[/]"
             + (f" and pushed {escape(branch)}." if branch else ".")
@@ -416,13 +441,15 @@ def _commit_changes(
     """Writes the changed object files and commits exactly those, plus the migration
     scripts named in `scripts` (paths relative to the scripts folder) and a refreshed
     Dependencies.json when the repo tracks it. Returns (short sha, pushed branch)."""
-    if not changes and not scripts and not _dependencies_pending(state):
+    setup = _uncommitted_setup(state)
+    if not changes and not scripts and not setup and not _dependencies_pending(state):
         return None, None
     try:
         root = git_ops.repo_root(state.config.root)
     except git_ops.GitError as exc:
         fail(opts, "git", str(exc))
         raise
+    state.setup_files = setup
     paths: list[Path] = []
     for change in changes:
         if change.key in state.uncommitted:
@@ -430,6 +457,7 @@ def _commit_changes(
         else:
             paths.append(_write_from_database(state, change))
     paths += [state.scripts_dir / rel for rel in scripts or []]
+    paths += [state.config.root / name for name in setup]
     if state.dependencies is not None:
         # refreshed with the objects it describes; git skips it when unchanged
         deps_mod.write(state.scripts_dir, state.dependencies)
@@ -589,7 +617,7 @@ def run_update(
                         cur = conn.cursor()
                         for statement in closing:
                             cur.execute(statement)
-                    after = read_database(conn, state.target).objects
+                    after = _in_scope(state.target, read_database(conn, state.target).objects)
                     tracked = [k for k in state.folder if k.type == "data"]
                     _read_static_data(conn, state.target, tracked, after)
                 finally:
@@ -705,7 +733,7 @@ def _run_before_migrations(opts: Opts, state: State, plan: Plan):
             try:
                 result = apply(conn, plan, state.target)
                 if not result.failed:
-                    state.db = read_database(conn, state.target).objects
+                    state.db = _in_scope(state.target, read_database(conn, state.target).objects)
                     _read_static_data(conn, state.target, [k for k in state.folder if k.type == "data"], state.db)
                     for key in result.done:
                         state.applied[key.name] = Applied(key.name, datetime.now(timezone.utc), "", "")
@@ -725,8 +753,10 @@ def _print_kept(kept: list[Change]) -> None:
 def _default_message(state: State, changes: list[Change], scripts: list[str] | None = None) -> str:
     names = ", ".join(c.key.display for c in changes[:5])
     more = f" and {len(changes) - 5} more" if len(changes) > 5 else ""
+    if not changes and scripts:
+        return f"Add {len(scripts)} migration script(s): " + ", ".join(scripts)
     if not changes:
-        return f"Add {len(scripts or [])} migration script(s): " + ", ".join(scripts or [])
+        return f"Link the repo to {state.target.name}: " + ", ".join(state.setup_files)
     scripted = f" and {len(scripts)} migration script(s)" if scripts else ""
     return f"Update {len(changes)} object(s){scripted} from {state.target.name}: {names}{more}"
 
@@ -1170,6 +1200,7 @@ class State:
     # Objects whose file matches the database but not HEAD (see _uncommitted).
     uncommitted: set[ObjectKey] = field(default_factory=set)
     push_error: str | None = None
+    setup_files: list[str] = field(default_factory=list)  # sqlsc.yml and friends, taken along by a commit
     # What this working copy and the target last agreed on (see sync.py).
     sync: SyncRecord = field(default_factory=lambda: SyncRecord(None))
     # Migrations/ scripts in the repo, and the ones sqlsc.Migration says the target has run.
@@ -1225,24 +1256,20 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     if "table" in skipped:
         skipped.add("data")
         warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
-    platform = platform_schemas(target)
-    folder = {
-        k: v
-        for k, v in folder.items()
-        if k.type not in skipped and (k.name if k.type == "schema" else k.schema) not in platform
-    }
+    folder = {k: v for k, v in folder.items() if k.type not in skipped and in_scope(target, schema_of(k))}
     spinner = nullcontext() if opts.as_json else err_console.status(f"Reading {target.label} '{target.name}'…")
     try:
         with spinner:
             conn = open_connection(target)
             try:
                 result = read_database(conn, target)
+                result.objects = _in_scope(target, result.objects)
                 result.warnings += _read_static_data(
                     conn, target, [k for k in folder if k.type == "data"], result.objects
                 )
                 if files is None and deps_mod.tracked(cfg.scripts_dir):
                     try:
-                        dependencies = deps_mod.render(deps_mod.read(conn, platform_schemas(target)))
+                        dependencies = deps_mod.render(_dependencies(conn, target))
                     except Exception as exc:  # pyodbc.Error: the platform has no dependency view
                         warnings.append(f"{deps_mod.FILE} was not refreshed: {_first_error_line(exc)}")
                 if scripts and target.caps["tables"]:
@@ -1282,6 +1309,14 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         applied=applied,
         dependencies=dependencies,
     )
+
+
+def _in_scope(target: config_mod.Target, objects: dict[ObjectKey, str]) -> dict[ObjectKey, str]:
+    return {k: v for k, v in objects.items() if in_scope(target, schema_of(k))}
+
+
+def _dependencies(conn: Any, target: config_mod.Target) -> list[deps_mod.Dependency]:
+    return [d for d in deps_mod.read(conn, platform_schemas(target)) if target.keeps_schema(d.schema)]
 
 
 def _write_from_database(state: State, change: Change) -> Path:
@@ -1406,6 +1441,20 @@ def _dependencies_pending(state: State) -> bool:
         return deps_mod.FILE in git_ops.uncommitted(root, state.scripts_dir)
     except git_ops.GitError:
         return False
+
+
+# The files `init` writes beside sqlsc.yml. Commit takes them along while they are new or
+# changed, so the repo's first commit links it to the database and keeps .sqlsc/ out of git.
+SETUP_FILES = (config_mod.CONFIG_NAME, ".gitattributes", ".gitignore")
+
+
+def _uncommitted_setup(state: State) -> list[str]:
+    try:
+        root = git_ops.repo_root(state.config.root)
+        dirty = git_ops.uncommitted(root, state.config.root)
+    except git_ops.GitError:
+        return []
+    return [name for name in SETUP_FILES if name in dirty]
 
 
 def _uncommitted_migrations(state: State) -> list[str]:

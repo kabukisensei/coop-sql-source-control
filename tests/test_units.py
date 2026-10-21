@@ -235,7 +235,14 @@ def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_
     first = run(tmp_path, "--json", "commit", "-m", "Script")
     assert first.exit_code == 0, first.output
     assert json.loads(first.output)["summary"] == {"new": 1, "changed": 0, "deleted": 0}
-    assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD") == "database/Views/dbo.vSales.sql"
+    # The first commit also links the repo: init's files go along while they are new.
+    assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split() == [
+        ".gitattributes",
+        ".gitignore",
+        "database/Views/dbo.vSales.sql",
+        "sqlsc.yml",
+    ]
+    assert json.loads(first.output)["setup_files"] == ["sqlsc.yml", ".gitattributes", ".gitignore"]
 
     # Edited by hand and applied: the database matches the file, HEAD does not.
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 2;\nGO\n"
@@ -245,6 +252,13 @@ def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_
     assert "SELECT 2" in _git(tmp_path, "show", "HEAD:database/Views/dbo.vSales.sql")
     assert json.loads(run(tmp_path, "--json", "commit").output)["commit"] is None
     assert _git(tmp_path, "status", "--porcelain", "--", "database") == ""
+
+    # An edited filter is committed on its own once nothing else differs.
+    with (tmp_path / "sqlsc.yml").open("a") as handle:
+        handle.write("exclude_schemas: [staging]\n")
+    third = json.loads(run(tmp_path, "--json", "commit").output)
+    assert third["setup_files"] == ["sqlsc.yml"] and third["commit"]
+    assert _git(tmp_path, "log", "-1", "--format=%s") == "Link the repo to dev: sqlsc.yml"
 
 
 def test_a_failed_push_keeps_the_commit_and_says_so(tmp_path, fake_db):
@@ -844,7 +858,8 @@ def test_commit_takes_new_migration_scripts_along(tmp_path, fake_db, monkeypatch
     result = json.loads(run(tmp_path, "--json", "commit").output)
     rel = f"Migrations/{Path(added['path']).name}"
     assert result["commit"] and result["migrations"] == [rel]
-    assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD") == "database/" + rel
+    committed = _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed == [".gitattributes", ".gitignore", "database/" + rel, "sqlsc.yml"]
     assert "Add 1 migration script(s)" in _git(tmp_path, "log", "-1", "--format=%s")
 
 
@@ -915,3 +930,85 @@ def test_an_agents_checkout_belongs_to_the_person_it_works_for():
     assert not owns("ada@example.com", "coop-agent:ada@example.com")
     assert not owns("coop-agent:bob@example.com", "ada@example.com")
     assert not owns("coop-agent:ada@example.com", "coop-agent:bob@example.com")
+
+
+# --- schema filter ------------------------------------------------------------------
+
+
+def test_schema_lists_in_sqlsc_yml_are_case_blind_and_ignore_wins(tmp_path):
+    (tmp_path / "sqlsc.yml").write_text(
+        "target: dev\nschemas: [Sales, finance]\nexclude_schemas: FINANCE\n"
+        "targets:\n  dev:\n    kind: azure_sql\n    server: s\n    database: d\n"
+    )
+    dev = load(tmp_path).target()
+    assert dev.keeps_schema("sales") and dev.keeps_schema("SALES")
+    assert not dev.keeps_schema("finance")  # ignored, though included
+    assert not dev.keeps_schema("dbo")  # not on the include list
+    open_target = build_target("dev", {"kind": "azure_sql", "server": "s", "database": "d"})
+    assert open_target.keeps_schema("dbo")  # no lists: the whole database
+
+
+def test_a_schema_list_that_is_not_names_says_how_to_write_it(tmp_path):
+    (tmp_path / "sqlsc.yml").write_text("schemas: {sales: true}\n")
+    with pytest.raises(ConfigError, match=r"list of schema names"):
+        load(tmp_path)
+
+
+def test_left_out_schemas_are_not_scripted_compared_or_deleted(tmp_path, fake_db):
+    assert run(tmp_path, "init", "--kind", "azure_sql", "--server", "s", "--database", "Sales").exit_code == 0
+    with (tmp_path / "sqlsc.yml").open("a") as handle:
+        handle.write("exclude_schemas: [staging]\n")
+    fake_db[ObjectKey("schema", "", "staging")] = "CREATE SCHEMA [staging];\nGO\n"
+    fake_db[ObjectKey("view", "staging", "vLoad")] = "CREATE VIEW staging.vLoad AS SELECT 1;\nGO\n"
+    fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
+    # A file the team scripted before the schema was left out stays, and is not "deleted".
+    write_object(tmp_path / "database", ObjectKey("view", "staging", "vOld"), "CREATE VIEW staging.vOld AS SELECT 2;\n")
+
+    status = json.loads(run(tmp_path, "--json", "status").output)
+    assert status["summary"] == {"new": 1, "changed": 0, "deleted": 0}
+    assert run(tmp_path, "script").exit_code == 0
+    assert (tmp_path / "database" / "Views" / "dbo.vSales.sql").is_file()
+    assert not (tmp_path / "database" / "Views" / "staging.vLoad.sql").exists()
+    assert (tmp_path / "database" / "Views" / "staging.vOld.sql").is_file()
+
+
+def test_a_cp1252_console_gets_question_marks_not_a_crash(tmp_path, monkeypatch):
+    import io
+    import sys
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stream)
+    cli_mod._printable_output()
+    print("✓ Wrote sqlsc.yml", file=stream)
+    stream.flush()
+    assert raw.getvalue().decode("cp1252").startswith("? Wrote sqlsc.yml")
+
+
+def test_init_writes_the_schema_filter_and_says_so(tmp_path):
+    result = run(
+        tmp_path,
+        "--json",
+        "init",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s",
+        "--database",
+        "Sales",
+        "--schema",
+        "sales",
+        "--schema",
+        "Finance",
+        "--exclude-schema",
+        "staging",
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["schemas"] == ["sales", "Finance"] and payload["exclude_schemas"] == ["staging"]
+    dev = load(tmp_path).target()
+    assert dev.keeps_schema("finance") and not dev.keeps_schema("dbo") and not dev.keeps_schema("staging")
+    plain = json.loads(
+        run(tmp_path, "--json", "init", "--force", "--kind", "azure_sql", "--server", "s", "--database", "Sales").output
+    )
+    assert set(plain) == {"ok", "command", "config", "folder", "target"}
