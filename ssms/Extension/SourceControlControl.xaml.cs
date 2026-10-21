@@ -549,6 +549,7 @@ namespace CoopSqlSourceControl
             var sha = result.Json.Value<string>("commit");
             var released = TargetInfo.Items(result.Json, "released").Count();
             var notMine = (result.Json["not_checked_out"] as JArray)?.Select(n => n.ToString()).ToList() ?? new List<string>();
+            var kept = TargetInfo.Items(result.Json, "held_back").Select(h => h.Value<string>("object")).ToList();
             if (sha != null)
             {
                 CommitMessageBox.Clear();
@@ -559,6 +560,7 @@ namespace CoopSqlSourceControl
             var pushFailed = result.Json.Value<string>("push_error");
             Say((pushFailed != null ? pushFailed + " " : sha != null ? "Committed as " + sha + (pushedTo != null ? " and pushed " + pushedTo : string.Empty) + ". " : string.Empty)
                 + "Released " + released + " object(s)."
+                + (kept.Count > 0 ? " Still checked out, not committed (changed on both sides or in the repo since your last sync; see Changed in): " + string.Join(", ", kept) + "." : string.Empty)
                 + (notMine.Count > 0 ? " Not checked out by you: " + string.Join(", ", notMine) + "." : string.Empty));
         }
 

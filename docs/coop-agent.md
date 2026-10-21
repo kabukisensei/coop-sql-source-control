@@ -78,7 +78,9 @@ $ coop-sqlsc --json status --target dev
 sides: show the diff and ask), or `unknown` (never seen in sync). `commit`
 leaves `repo` and `both` objects alone and lists them under `held_back`;
 `get-latest` leaves `database` and `both` objects alone and lists them under
-`kept`. Each entry carries a `reason`. `--force` on either command overrides
+`kept`. Each entry carries a `reason`. An object dropped on one side and
+edited on the other is `both`, never a plain deletion. `checkin` keeps its
+`held_back` objects checked out and answers `ok: false`. `--force` on either command overrides
 that, so only pass it when the person has chosen a side.
 
 `user` is who sqlsc ran as (git `user.email`, or `--as`); `locked_by` names
@@ -89,6 +91,9 @@ who has an object checked out and `mine` is true when that is this user, so
 `Migrations/` that this database has not run yet (see the README). A whole
 `get-latest` or `deploy` runs them and lists them under `migrations`; a
 `get-latest` of named objects does not. `sqlsc --json migrations` gives every
-script with its `state` (`pending`, `applied`, `edited`), and
+script with its `state` (`pending`, `applied`, `edited`, or `unknown` when
+`sqlsc.Migration` could not be read: then `status` says
+`migrations.history_unknown: true` and a whole update fails with error kind
+`history` before running anything), and
 `sqlsc --json migrations add <name>` creates one and returns its `path`; the
 agent then writes the SQL into that file and commits it with `commit`.

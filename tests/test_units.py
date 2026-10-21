@@ -677,7 +677,7 @@ def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypat
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 2;\nGO\n"  # edited in the database, not committed
 
     applied: list[str] = []
-    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: applied.append(plan) or _no_failures())
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target, *_: applied.append(plan) or _no_failures())
     result = json.loads(run(tmp_path, "--json", "get-latest").output)
     assert result["steps"] == [] and [k["object"] for k in result["kept"]] == ["[dbo].[vSales]"]
     assert "changed in the database" in result["kept"][0]["reason"]
@@ -696,7 +696,7 @@ def test_a_failed_update_reads_cleanly(tmp_path, fake_db, monkeypatch):
         done: list = []
         transactional = True
 
-    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: Failed())
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target, *_: Failed())
     result = run(tmp_path, "get-latest")
     assert result.exit_code == 1
     text = " ".join(result.output.split())
@@ -821,7 +821,7 @@ def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_pa
 
     # Run: the before script goes on its own, the database is read again, then the rest.
     plans: list = []
-    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target: plans.append(plan) or _no_failures(plan))
+    monkeypatch.setattr(cli_mod, "apply", lambda conn, plan, target, *_: plans.append(plan) or _no_failures(plan))
     result = json.loads(run(tmp_path, "--json", "get-latest").output)
     assert result["applied"] is True
     assert [[s.key.name for s in p.steps] for p in plans] == [["001_prepare"], ["vSales", "002_backfill"]]
@@ -907,6 +907,12 @@ def test_a_deploy_with_nothing_to_change_still_records_the_release(tmp_path, fak
     class Conn:
         def cursor(self):
             return Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
 
         def close(self):
             pass
