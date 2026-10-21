@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
-    <Identity Id="CoopSqlSourceControl.772e6ac3-d552-4127-ba5f-3c25fd661535" Version="1.0.2" Language="en-US" Publisher="Cooptimize" />
+    <Identity Id="CoopSqlSourceControl.772e6ac3-d552-4127-ba5f-3c25fd661535" Version="1.0.3" Language="en-US" Publisher="Cooptimize" />
     <DisplayName>Coop SQL Source Control</DisplayName>
     <Description xml:space="preserve">Source control for SQL Server, Azure SQL and Microsoft Fabric databases in SSMS: status, diff, commit, get latest, checkout and check-in, through the sqlsc command line.</Description>
   </Metadata>
