@@ -24,6 +24,7 @@ from .scripter import (
     script_schema,
     script_table,
 )
+from .sqltext import declared_as
 
 # The sqlsc schema holds this tool's own lock table; it is never scripted.
 # sysdiagrams and its helper procedures come from SSMS, not from the team.
@@ -199,6 +200,14 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
             if definition is None:
                 result.warnings.append(f"{key.display} is encrypted; its definition cannot be scripted.")
                 continue
+            # sp_rename and ALTER SCHEMA ... TRANSFER leave the stored CREATE naming the old
+            # object; scripted as stored, the file would re-create the old name on a deploy.
+            definition, stale = declared_as(definition, key.schema, key.name)
+            if stale:
+                result.warnings.append(
+                    f"{key.display}: its stored definition still declares {stale} (renamed or moved after "
+                    "it was created); scripted under its current name. ALTER it from that script to clear this."
+                )
             result.objects[key] = script_module(
                 definition, ansi_nulls=bool(ansi_nulls), quoted_identifier=bool(quoted_identifier)
             )
