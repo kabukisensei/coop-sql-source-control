@@ -341,7 +341,17 @@ are bracketed only where needed, column lists use Cooptimize's leading-comma
 layout, and constraint names SQL Server generated itself (`PK__Tag__3214EC07…`)
 are left out because they differ in every database. Views, procedures, functions
 and triggers are stored exactly as written, with line endings and trailing
-spaces normalized.
+spaces normalized outside string literals and quoted names. Inside a literal
+every space and line break is the value: it is kept, and a change there is a
+change (only a literal's line-break style, CR LF or LF, does not count, since
+Git's `text` attribute rewrites it on checkout).
+
+A view, procedure, function or trigger renamed with `sp_rename` (or moved with
+`ALTER SCHEMA ... TRANSFER`) keeps its old name in its stored `CREATE`. Its
+script takes the current name, so running the file re-creates the object it now
+is, and the read warns about it until the object is altered from that script.
+`get-latest` and `deploy` hold back (as a manual step) any file whose `CREATE`
+names another object than its file, such as one scripted before 1.0.4.
 
 ## Lineage
 

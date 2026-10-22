@@ -35,6 +35,7 @@ from .locks import CREATE_SCHEMA
 from .migrations import BEFORE, Migration
 from .objects import ObjectKey, batches
 from .scripter import qualified, quote
+from .sqltext import declared_as
 
 # Order steps run in. Drops of code objects go first so nothing they read blocks
 # a table change; static data once its tables (and their triggers) exist; table
@@ -182,6 +183,9 @@ def _create_steps(key: ObjectKey, text: str) -> list[Step]:
         if keys:
             out.append(Step(key, "create", PH_TABLE_KEYS, keys, ["foreign keys"]))
         return out
+    stale = _declares_other(key, text)
+    if stale:
+        return [Step(key, "manual", PH_CODE, [], [stale])]
     return [Step(key, "create", PH_CODE, parts)]
 
 
@@ -270,6 +274,9 @@ def _change_step(
     if key.type == "data":
         return _data_step(key, repo_text)
     if key.type in _DROP_WORD:
+        stale = _declares_other(key, repo_text)
+        if stale:
+            return Step(key, "manual", PH_CODE, [], [stale])
         return Step(key, "alter", PH_CODE, [to_alter(b) for b in batches(repo_text)])
     if key.type == "schema":
         return Step(key, "manual", PH_SCHEMA, [], ["the schema's owner changed; change it with ALTER AUTHORIZATION"])
@@ -280,6 +287,19 @@ def _change_step(
     if not statements:
         return Step(key, "skip", PH_TABLE, [], notes or ["only the column order differs; ALTER cannot reorder columns"])
     return Step(key, "alter", PH_TABLE, statements, notes)
+
+
+def _declares_other(key: ObjectKey, text: str) -> str | None:
+    """Why a module file cannot be run as it is: its CREATE names another object than
+    the one its file is (a file scripted before 1.0.4 from a renamed object), so running
+    it would create the old name. None when the names agree."""
+    _fixed, stale = declared_as(text, key.schema, key.name)
+    if stale is None:
+        return None
+    return (
+        f"the file's CREATE declares {stale}, not {key.display}; running it would create {stale}. "
+        f"Script {key.display} again from the database, or correct the name in the file"
+    )
 
 
 class ManualChange(Exception):

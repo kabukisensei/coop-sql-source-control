@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import sqltext
+
 # Object type -> folder name in the repo. The order is also the order objects are
 # listed in, and the order a deploy creates them in (schemas before tables, tables
 # before the views that read them).
@@ -55,18 +57,15 @@ class ObjectKey:
 
 
 def normalize(text: str) -> str:
-    """Line endings to LF, no trailing spaces, no leading or trailing blank lines.
+    """Line endings to LF, no trailing spaces, no leading or trailing blank lines,
+    outside string literals and quoted names (sqltext.normalize).
 
     Applied to both sides so a script that only differs in whitespace at line
-    ends (an editor setting, a CRLF checkout on Windows) never shows as a change.
+    ends (an editor setting, a CRLF checkout on Windows) never shows as a change,
+    while a space or line break inside a literal is the literal's value and is
+    kept, scripted and compared as it is.
     """
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    lines = [line.rstrip() for line in lines]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines) + "\n" if lines else ""
+    return sqltext.normalize(text)
 
 
 _GO = re.compile(r"^[ \t]*GO[ \t]*(?:--[^\n]*)?$", re.IGNORECASE | re.MULTILINE)

@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .objects import ObjectKey, batches, normalize
+from .objects import ObjectKey, batches
 
 FOLDER = "Migrations"
 BEFORE, AFTER = "before", "after"
@@ -50,6 +50,19 @@ CREATE TABLE sqlsc.Migration
 APPLIED_SQL = "SELECT MigrationId, AppliedAt, AppliedBy, Checksum FROM sqlsc.Migration"
 
 
+def _checksum_text(text: str) -> str:
+    """The text a checksum is taken over: line ends trimmed everywhere, the way every
+    release before 1.0.4 did it, so a migration already applied keeps its checksum and
+    is not reported as edited. (Object scripts keep spaces inside literals; a checksum
+    only has to stay stable.)"""
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + "\n" if lines else ""
+
+
 @dataclass(frozen=True)
 class Migration:
     id: str  # the file name without .sql
@@ -58,7 +71,7 @@ class Migration:
 
     @property
     def checksum(self) -> str:
-        return hashlib.sha256(normalize(self.text).encode("utf-8")).hexdigest()[:32]
+        return hashlib.sha256(_checksum_text(self.text).encode("utf-8")).hexdigest()[:32]
 
     @property
     def key(self) -> ObjectKey:

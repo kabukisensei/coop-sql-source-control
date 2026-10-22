@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .layout import relative_path
 from .objects import TYPE_LABELS, ObjectKey, batches
+from .sqltext import same_line_endings
 from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
 
 NEW, CHANGED, DELETED = "new", "changed", "deleted"
@@ -96,8 +97,11 @@ def comparable(key: ObjectKey, text: str) -> str:
     """The text two sides are compared on. For a table, the order of its columns and
     of the statements after CREATE TABLE does not count: ALTER TABLE can only add
     columns at the end, so a column inserted mid-table in the repo would otherwise
-    differ forever (SQL Compare ignores column order by default too).
+    differ forever (SQL Compare ignores column order by default too). A line break
+    inside a literal counts whatever its style (sqltext.same_line_endings); a space
+    or any other character inside one counts as written.
     """
+    text = same_line_endings(text)
     if key.type == "data":
         return _comparable_data(text)
     if key.type != "table":
