@@ -29,6 +29,7 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="Auto" />
@@ -119,5 +120,7 @@
 
     <TextBlock x:Name="StatusText" Grid.Row="3" Grid.ColumnSpan="3" Margin="0,6,0,0" TextWrapping="Wrap"
                Text="Open a repo's sqlsc.yml to start." />
+    <TextBlock x:Name="SqlscText" Grid.Row="4" Grid.ColumnSpan="3" Margin="0,4,0,0" TextWrapping="Wrap" Opacity="0.7"
+               Text="" ToolTip="Which sqlsc command line this window runs, and its version" />
   </Grid>
 </UserControl>

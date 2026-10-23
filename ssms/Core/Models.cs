@@ -114,6 +114,75 @@ namespace CoopSqlSourceControl.Core
         }
     }
 
+    /// <summary>
+    /// What a Commit of these rows would do, worked out from the grid the way sqlsc will:
+    /// objects checked out by someone else are left to them, objects the repo moved (Repo
+    /// or Both) are left for Get latest or a diff; the rest are committed. The window asks
+    /// about, and counts, only the committable ones (dev VM finding 3, 2026-10-23).
+    /// </summary>
+    public sealed class CommitPlan
+    {
+        public CommitPlan(IList<ChangeInfo> rows)
+        {
+            Committable = rows.Where(r => !Locked(r) && !r.IsFromRepo && !r.IsConflict).ToList();
+            CheckedOutByOthers = rows.Where(Locked).ToList();
+            HeldBack = rows.Where(r => !Locked(r) && (r.IsFromRepo || r.IsConflict)).ToList();
+        }
+
+        public IList<ChangeInfo> Committable { get; }
+
+        public IList<ChangeInfo> CheckedOutByOthers { get; }
+
+        public IList<ChangeInfo> HeldBack { get; }
+
+        private static bool Locked(ChangeInfo row)
+        {
+            return row.LockedBy != null && !row.IsMine;
+        }
+
+        /// <summary>"1 is left for Get latest (the repo changed it); 1 is checked out by bob." or empty.</summary>
+        public string LeftOut
+        {
+            get
+            {
+                var parts = new List<string>();
+                if (HeldBack.Count > 0)
+                {
+                    var both = HeldBack.Count(h => h.IsConflict);
+                    parts.Add(HeldBack.Count + (HeldBack.Count == 1 ? " is" : " are") + " left out because the repo changed "
+                        + (HeldBack.Count == 1 ? "it" : "them") + (both > 0 ? " (" + both + " on both sides)" : string.Empty)
+                        + "; Get latest applies the repo's version, Diff shows it");
+                }
+
+                if (CheckedOutByOthers.Count > 0)
+                {
+                    var owners = string.Join(", ", CheckedOutByOthers.Select(c => c.LockedBy).Distinct());
+                    parts.Add(CheckedOutByOthers.Count + (CheckedOutByOthers.Count == 1 ? " is" : " are") + " checked out by " + owners);
+                }
+
+                return parts.Count == 0 ? string.Empty : string.Join("; ", parts) + ".";
+            }
+        }
+
+        /// <summary>The question Commit asks, or null when there is nothing to ask about.</summary>
+        public string Question(string target, bool everything)
+        {
+            if (Committable.Count == 0)
+            {
+                return null;
+            }
+
+            var what = everything ? "every committable change (" + Committable.Count + ")" : Committable.Count + " change(s)";
+            return "Commit " + what + " from " + target + "?" + (LeftOut.Length > 0 ? "\n\n" + LeftOut : string.Empty);
+        }
+
+        /// <summary>What the window says instead of asking when nothing can be committed.</summary>
+        public string NothingToCommit(string target)
+        {
+            return "Nothing to commit from " + target + ": " + (LeftOut.Length > 0 ? LeftOut : "nothing differs.");
+        }
+    }
+
     /// <summary>Someone's checkout of one object.</summary>
     public sealed class LockInfo
     {

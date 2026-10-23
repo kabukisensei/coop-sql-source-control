@@ -7,7 +7,12 @@ coop-agent and CI always agree.
 
 - **Repo / Database**: open a repo's `sqlsc.yml` and pick one of its targets.
   The add-in remembers recent repos and the target last used with each
-  (`%APPDATA%\coop-sqlsc\ssms.json`).
+  (`%APPDATA%\coop-sqlsc\ssms.json`); a remembered repo whose `sqlsc.yml` is
+  gone leaves the list. The line under the status says which `sqlsc` the
+  window runs, its version and where it came from (coop's install in
+  `%USERPROFILE%\.local\bin` first, then `PATH`, then one chosen with **Find
+  sqlsc…**, which is forgotten once its file is gone), and warns when the
+  add-in and `sqlsc` are not the same `major.minor`.
 - **Changes**: what differs between the database and the repo, which side
   changed (*Changed in*: Database, Repo or Both, see the main README) and who
   has each object checked out (*you* for your own). Select rows, then
@@ -15,9 +20,13 @@ coop-agent and CI always agree.
   asks before running it), **Diff** (or double-click a row), **Check out**
   (with an optional note for the team), **Check in**, or **Track rows…** to
   keep a selected lookup table's rows in the repo as static data. With nothing
-  selected, Commit and Get latest act on everything, after asking. Commit
-  reports what it held back because the repo moved, and Get latest what it
-  kept because the database did. When the repo has migration scripts the
+  selected, Commit and Get latest act on everything, after asking. Commit's
+  question counts only the rows sqlsc will commit and names the rest (checked
+  out by someone else, or changed in the repo, which Get latest applies); when
+  nothing in the list can be committed it says so instead of asking. Commit
+  pulls the branch's upstream first and reports what it held back because the
+  repo moved, and Get latest what it kept because the database did (see
+  *Working as a team* in the main README for every rule). When the repo has migration scripts the
   database has not run, the status line says so and Get latest's question
   names them.
 - **Checkouts**: everything checked out in this repo. **Check in** commits and
@@ -27,9 +36,10 @@ coop-agent and CI always agree.
 
 ## Install
 
-1. Install the CLI: `pipx install git+https://github.com/kabukisensei/coop-sql-source-control`.
-   The add-in finds `sqlsc` on PATH or in `%USERPROFILE%\.local\bin`; otherwise
-   use **Find sqlsc…** in the window.
+1. Install the CLI. It comes with coop (`coop update` keeps it current in
+   `%USERPROFILE%\.local\bin`, which the add-in uses first); without coop,
+   `pipx install git+https://github.com/kabukisensei/coop-sql-source-control`
+   puts it on PATH. Otherwise use **Find sqlsc…** in the window.
 2. Download `CoopSqlSourceControl.vsix` and `install-ssms.ps1` from the
    [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)
    (or, between releases, the `CoopSqlSourceControl-vsix` artifact of the latest

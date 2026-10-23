@@ -27,6 +27,12 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
 - `schemas` / `exclude_schemas` in `sqlsc.yml` (written by `init --schema` /
   `--exclude-schema`) narrow every command to part of the database.
 - `data add` and `data remove` only write or delete files under `Data/`.
+- `commit` and `checkin` fast-forward the branch onto its upstream before they read
+  anything (`--no-pull` skips it) and refuse, with `"error": {"kind": "git"}`, on a
+  detached HEAD, a merge in progress, unresolved conflicts, a missing git identity or
+  a branch that cannot fast-forward; the answer's `git` block says what was pulled.
+  coop-agent's own fetch-and-fast-forward before `sql_source commit` stays: the two
+  agree, and sqlsc's check also covers the SSMS window and the shell.
 - `checkout`, `checkin`, `unlock` and `guard` write only to the `sqlsc` schema
   (the lock table and the guard trigger); `checkin` also makes a git commit.
   A checkout that clashes returns `"ok": false` with the owner in `conflicts`
@@ -47,12 +53,14 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
    shows `get-latest --dry-run` before running it.
 4. Before the agent edits an object it runs
    `coop-sqlsc --json checkout <object> --as coop-agent:<user> -m "<task>"`, and
-   stops to tell the user if `conflicts` is not empty. coop never commits source,
-   so it does not run `commit` or `checkin`: the person reviews the change and
-   checks it in themselves (from the SSMS add-in or `sqlsc checkin`), because a
+   stops to tell the user if `conflicts` is not empty. After an approved dev change
+   it runs `script`, shows the diff, then `commit --as coop-agent:<user> -m "…"`
+   (one approval per commit, never `--push` or `--force`) and `unlock --as
+   coop-agent:<user>` for what it committed; pushing stays a person's step. A
    checkout held by `coop-agent:<user>` counts as that user's own (`mine` is true
-   for them). Naming the agent in `--as` keeps it from taking the person's own
-   checkouts, and keeps its checkouts apart from everyone else's.
+   for them), so the person can also check it in themselves (from the SSMS add-in
+   or `sqlsc checkin`). Naming the agent in `--as` keeps it from taking the
+   person's own checkouts, and keeps its checkouts apart from everyone else's.
 
 ## Example
 

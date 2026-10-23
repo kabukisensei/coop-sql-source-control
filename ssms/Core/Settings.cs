@@ -65,6 +65,17 @@ namespace CoopSqlSourceControl.Core
             }
         }
 
+        /// <summary>
+        /// Drops remembered repos whose sqlsc.yml is gone (a deleted clone, a temporary
+        /// folder): the list offers only repos that can be opened. Returns what it dropped.
+        /// </summary>
+        public IList<string> Prune(Func<string, bool> exists)
+        {
+            var gone = Recent.Where(r => !exists(r.ConfigPath)).Select(r => r.ConfigPath).ToList();
+            Recent.RemoveAll(r => gone.Contains(r.ConfigPath));
+            return gone;
+        }
+
         public string LastTarget(string configPath)
         {
             return Recent.FirstOrDefault(r => SamePath(r.ConfigPath, configPath))?.Target;
