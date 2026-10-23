@@ -1030,3 +1030,22 @@ def test_init_writes_the_schema_filter_and_says_so(tmp_path):
         run(tmp_path, "--json", "init", "--force", "--kind", "azure_sql", "--server", "s", "--database", "Sales").output
     )
     assert set(plain) == {"ok", "command", "config", "folder", "target"}
+
+
+# --- file names longer than the file system allows (#45) ----------------------------------
+
+
+def test_long_object_names_are_refused_before_writing(tmp_path):
+    from coop_sqlsc.layout import FileNameTooLong, file_name_problem
+
+    long_key = ObjectKey("table", "s" * 128, "t" * 128)
+    problem = file_name_problem(long_key)
+    assert problem is not None and "261 characters" in str(problem) and "255" in str(problem)
+    with pytest.raises(FileNameTooLong):
+        write_object(tmp_path, long_key, "-- fixture only\n")
+    assert not list(tmp_path.rglob("*.sql")), "nothing is written"
+    fits = ObjectKey("table", "s" * 124, "t" * 126)  # 124 + 1 + 126 + 4 = 255
+    assert file_name_problem(fits) is None
+    assert file_name_problem(ObjectKey("view", "dbo", "Ärger")) is None
+    assert file_name_problem(ObjectKey("schema", "", "x" * 251)) is None  # 251 + 4 = 255
+    assert file_name_problem(ObjectKey("schema", "", "x" * 252)) is not None

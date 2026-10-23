@@ -35,7 +35,15 @@ from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, co
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
 from .deploy import GUARDED_KINDS, Plan, apply, build_plan, migration_steps
-from .layout import delete_object, key_for_path, objects_from_files, read_folder, relative_path, write_object
+from .layout import (
+    delete_object,
+    file_name_problem,
+    key_for_path,
+    objects_from_files,
+    read_folder,
+    relative_path,
+    write_object,
+)
 from .locks import Lock, LockError, LockStore
 from .migrations import BEFORE, Applied, Migration
 from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
@@ -325,6 +333,8 @@ def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_ru
     """Write the database's objects into the repo folder (new, changed and deleted files)."""
     state = _read_state(opts, target_name)
     changes = _filter(state.changes(), objects)
+    if not dry_run:
+        _refuse_long_names(opts, changes)
     written: list[dict[str, str]] = []
     for change in changes:
         if not dry_run:
@@ -540,6 +550,7 @@ def _commit_changes(
         fail(opts, "git", str(exc))
         raise
     state.setup_files = setup
+    _refuse_long_names(opts, [c for c in changes if c.key not in state.uncommitted])
     paths: list[Path] = []
     for change in changes:
         if change.key in state.uncommitted:
@@ -1505,6 +1516,22 @@ def _in_scope(target: config_mod.Target, objects: dict[ObjectKey, str]) -> dict[
 
 def _dependencies(conn: Any, target: config_mod.Target) -> list[deps_mod.Dependency]:
     return [d for d in deps_mod.read(conn, platform_schemas(target)) if target.keeps_schema(d.schema)]
+
+
+def _refuse_long_names(opts: Opts, changes: list[Change]) -> None:
+    """Stops before any file is written when an object's file name would not fit the
+    file system (#45): a schema and a name of 128 characters each make a 261-character
+    file name. A raw OSError half-way through a run would leave the folder half
+    written; this names the objects first, so the run can leave them out."""
+    problems = [p for c in changes if c.action != DELETED and (p := file_name_problem(c.key))]
+    if problems:
+        names = "; ".join(str(p) for p in problems)
+        fail(
+            opts,
+            "path",
+            f"Not written: {names} Shorten the schema or object name, or name the other "
+            f"objects on the command line to leave these out. Nothing was changed in the files.",
+        )
 
 
 def _write_from_database(state: State, change: Change) -> Path:

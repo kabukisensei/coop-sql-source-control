@@ -72,5 +72,22 @@ _GO = re.compile(r"^[ \t]*GO[ \t]*(?:--[^\n]*)?$", re.IGNORECASE | re.MULTILINE)
 
 
 def batches(text: str) -> list[str]:
-    """A script split on its GO lines, the way SSMS and sqlcmd split it."""
-    return [b.strip() for b in _GO.split(text) if b.strip()]
+    """A script split on its GO lines, the way SSMS and sqlcmd split it.
+
+    A GO line counts only in plain code: a line reading GO inside a string literal,
+    a quoted name or a block comment is the literal's, name's or comment's text and
+    stays where it is (sqltext.runs tells the two apart). Each batch keeps its
+    original bytes; only the GO lines are taken out.
+    """
+    masked = "".join(run if kind == "code" or run.startswith("--") else _mask(run) for kind, run in sqltext.runs(text))
+    out, start = [], 0
+    for match in _GO.finditer(masked):
+        out.append(text[start : match.start()])
+        start = match.end()
+    out.append(text[start:])
+    return [b.strip() for b in out if b.strip()]
+
+
+def _mask(run: str) -> str:
+    """The run with every character but a line break replaced, same length."""
+    return "".join("\n" if ch == "\n" else "x" for ch in run)
