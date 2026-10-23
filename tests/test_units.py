@@ -188,6 +188,18 @@ def fake_db(monkeypatch):
     objects: dict[ObjectKey, str] = {}
 
     class Conn:
+        """A database with no sqlsc.ObjectLock table yet (the first-run state): the lock
+        table reads as positively absent, so there are no checkouts."""
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql, *params):
+            return self
+
+        def fetchone(self):
+            return (0,)
+
         def close(self):
             pass
 

@@ -235,7 +235,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
     changes = sorted(differences + _uncommitted(state, {c.key for c in differences}), key=lambda c: c.key.sort_key)
     counts = summarize(changes)
     sides = _sides(changes)
-    held, who = _peek_locks(state, as_user)
+    held, who, _ = _peek_locks(state, as_user)
     pending = state.pending_migrations()
     git_info, git_notes = _repo_notes(state.config)
     state.warnings += git_notes
@@ -386,6 +386,8 @@ def commit(
     So are objects the repo changed since your last sync (a teammate's commit you have
     not applied yet): committing them would overwrite that work with the database's
     older version. Run `sqlsc get-latest` for those, or --force to commit them anyway.
+    When the checkouts cannot be read at all (lock database down, SELECT denied, a bad
+    `locks:` target), nothing is committed either: unknown ownership is not "nobody".
 
     Before anything is read, the branch is fast-forwarded onto its upstream (a
     teammate's pushed commits come in first, so the commit builds on them and the
@@ -396,10 +398,19 @@ def commit(
     state = _read_state(opts, target_name)
     differences = state.changes()
     changes = _filter(differences + _uncommitted(state, {c.key for c in differences}), objects)
-    held, who = _peek_locks(state, as_user)
+    held, who, unreadable = _peek_locks(state, as_user)
     skipped: list[Change] = []
     held_back: list[Change] = []
     pulled = _just_pulled(changes, git_info)
+    if unreadable and not force and changes:
+        # Nobody knows who has what checked out: a commit now could take a teammate's
+        # half-finished change. Nothing has been written to the files or the index yet.
+        fail(
+            opts,
+            "locks",
+            f"Not committed: {unreadable} Fix the connection (or `locks:` in sqlsc.yml) and run again; "
+            "--force commits without consulting checkouts. Nothing was changed in the files.",
+        )
     if not force:
         skipped = [c for c in changes if c.key in held and not _same_user(held[c.key].locked_by, who)]
         held_back = [c for c in changes if c not in skipped and (not c.from_database or c in pulled)]
@@ -943,6 +954,7 @@ def checkin(
         held_back: list[Change] = []
         state = None
         pulled: list[Change] = []
+        conflicted: list[ObjectKey] = []
         if keys and not no_commit:
             state = _read_state(opts, target.name)
             wanted = set(keys)
@@ -952,10 +964,13 @@ def checkin(
             pulled = _just_pulled(changes, git_info)
             held_back = [c for c in changes if not c.from_database or c in pulled]
             changes = [c for c in changes if c not in held_back]
+            # A file with unresolved merge conflict markers is out of the comparison, so
+            # it has no Change; "no difference" is not "committed" (#43).
+            conflicted = sorted((k for k in state.conflicted if k in wanted), key=lambda k: k.sort_key)
             sha, branch = _commit_changes(opts, state, changes, message, push)
         # What was held back is not in git yet: it stays checked out, so nobody else
         # edits it while the conflict is sorted out. --no-commit releases on purpose.
-        keeping = {c.key for c in held_back}
+        keeping = {c.key for c in held_back} | set(conflicted)
         to_release = [k for k in keys if k not in keeping]
         released: list[ObjectKey] = []
         if to_release:
@@ -969,12 +984,14 @@ def checkin(
         "push_error": state.push_error if state is not None else None,
         "files": [c.to_json() for c in changes],
         "released": [_key_json(k) for k in released],
-        "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled)} for c in held_back],
+        "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled)} for c in held_back]
+        + [_conflicted_json(k) for k in conflicted],
         "not_checked_out": list(unknown),
         "warnings": state.warnings if state is not None else [],
     }
     if opts.as_json:
-        sys.stdout.write(json.dumps({"ok": not unknown and not held_back, **payload}, indent=2) + "\n")
+        ok = not unknown and not held_back and not conflicted
+        sys.stdout.write(json.dumps({"ok": ok, **payload}, indent=2) + "\n")
     else:
         if not keys and not unknown:
             console.print(f"Nothing to check in: {escape(session.who)} has nothing checked out.")
@@ -994,11 +1011,15 @@ def checkin(
                 f"[yellow]![/] Kept {escape(change.key.display)} checked out, not committed: "
                 f"{escape(_hold_reason(change, pulled))}"
             )
+        for key in conflicted:
+            console.print(
+                f"[yellow]![/] Kept {escape(key.display)} checked out, not committed: {escape(_CONFLICT_REASON)}"
+            )
         for name in unknown:
             console.print(f"[yellow]![/] {escape(name)} is not checked out by {escape(session.who)}.")
         if state is not None:
             _print_warnings(state.warnings)
-    if unknown or held_back:
+    if unknown or held_back or conflicted:
         sys.exit(1)
 
 
@@ -1203,16 +1224,21 @@ def _guarded(opts: Opts, action: Any) -> Any:
         raise
 
 
-def _peek_locks(state: State, as_user: str | None) -> tuple[dict[ObjectKey, Lock], str]:
-    """Current checkouts for this repo, for status and commit. Never fails: a lock
-    database that cannot be reached becomes a warning."""
+def _peek_locks(state: State, as_user: str | None) -> tuple[dict[ObjectKey, Lock], str, str | None]:
+    """Current checkouts for this repo, for status and commit. Never raises: the third
+    value is None when ownership was read (a lock table that does not exist yet reads
+    as no checkouts), else why it could not be, also added to the warnings. Status
+    shows the warning and goes on; commit must not treat unknown ownership as "nobody
+    has anything checked out" (#44), so it stops unless --force."""
     cfg = state.config
     who = locks.current_user(cfg.root, as_user)
     try:
         target = cfg.target(cfg.lock_target) if cfg.lock_target else state.target
         locks.check_lock_target(target, configured=bool(cfg.lock_target))
-    except (ConfigError, LockError):
-        return {}, who
+    except (ConfigError, LockError) as exc:
+        problem = f"Checkouts could not be read: {exc}"
+        state.warnings.append(problem)
+        return {}, who, problem
     try:
         conn = open_connection(target)
         try:
@@ -1220,9 +1246,10 @@ def _peek_locks(state: State, as_user: str | None) -> tuple[dict[ObjectKey, Lock
         finally:
             conn.close()
     except Exception as exc:  # connect or query failure
-        state.warnings.append(f"Checkouts could not be read from '{target.name}': {_first_error_line(exc)}")
-        return {}, who
-    return {lock.key: lock for lock in rows}, who
+        problem = f"Checkouts could not be read from '{target.name}': {_first_error_line(exc)}"
+        state.warnings.append(problem)
+        return {}, who, problem
+    return {lock.key: lock for lock in rows}, who, None
 
 
 def _resolve(
@@ -1293,6 +1320,24 @@ def _lock_owner_text(lock: Lock) -> str:
 
 def _key_json(key: ObjectKey) -> dict[str, str]:
     return {"object": key.display, "type": key.type, "schema": key.schema, "name": key.name}
+
+
+_CONFLICT_REASON = (
+    "its file has unresolved merge conflict markers, so it was left out of the comparison; "
+    "resolve the conflict and `git add` the file, then check in again"
+)
+
+
+def _conflicted_json(key: ObjectKey) -> dict[str, str]:
+    """A held-back entry for an object whose file still carries conflict markers: it has
+    no Change (it is out of the comparison), only a reason."""
+    return {
+        "action": "conflict",
+        "origin": UNKNOWN,
+        **_key_json(key),
+        "path": relative_path(key),
+        "reason": _CONFLICT_REASON,
+    }
 
 
 def _first_error_line(exc: Exception) -> str:

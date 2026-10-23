@@ -195,8 +195,17 @@ off each other's work:
 - **A half-merged object file** (one that still has `<<<<<<<` / `>>>>>>>`
   conflict markers) is left out of every comparison, with a warning and under
   `conflicted` in `--json`: `get-latest` will not run the markers as SQL and
-  `script`/`commit` will not overwrite the merge. Resolve it in git and run
-  again.
+  `script`/`commit` will not overwrite the merge, and `checkin` keeps it checked
+  out (listed under `held_back` with the reason, exit 1) instead of releasing an
+  object it did not commit. Resolve it in git and run again.
+- **Unknown checkouts stop a commit.** When the lock table cannot be read (the
+  lock database is down, `SELECT` is denied, `locks: target:` names a target
+  that does not exist or cannot hold the table), `status` warns and goes on,
+  but `commit` refuses with `"error": {"kind": "locks"}` before writing
+  anything: not knowing who has what checked out is not the same as nobody
+  having anything checked out. `--force` commits without consulting checkouts. A
+  database that simply has no lock table yet (nobody has checked anything out)
+  reads as no checkouts, as before.
 - **Only its own files.** `commit` stages and commits the object files it wrote
   (plus `sqlsc.yml`, `.gitattributes`, `.gitignore` and `Migrations/` scripts
   when they changed); anything else you have staged or edited stays as it was.
@@ -249,9 +258,9 @@ need `locks: target:`. The `sqlsc` schema is never scripted or compared.
 - `status` shows who has each changed object checked out.
 - `commit` leaves objects someone else has checked out for them to check in
   (`--force` commits them anyway); `checkin` commits only your own. An object
-  `checkin` cannot commit (the repo changed it too since your last sync) stays
-  checked out, listed under `held_back`, and `checkin` exits 1; `--no-commit`
-  still releases everything.
+  `checkin` cannot commit (the repo changed it too since your last sync, or its
+  file still has merge conflict markers) stays checked out, listed under
+  `held_back`, and `checkin` exits 1; `--no-commit` still releases everything.
 - Checking out the same object twice is fine; checking out someone else's fails
   with their name, when they took it and their note, and exits 1.
 - An agent working for you checks out as `<agent>:<you>` (coop-agent uses

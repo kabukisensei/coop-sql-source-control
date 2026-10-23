@@ -438,3 +438,82 @@ def test_line_endings_do_not_count_as_a_change(team):
     team.db[V] = V1.replace("\n", "\r\n")
     path.write_text(V1)
     assert out(run(team.ada, "status"))["changes"] == []
+
+
+# --- #43 a half-merged file stays checked out through a check-in --------------------------
+
+
+def test_checkin_keeps_a_marker_conflicted_object_checked_out(team):
+    team.db[V] = V1
+    team.db[W] = W1
+    assert run(team.ada, "commit", "-m", "baseline", "--push").exit_code == 0
+    assert run(team.ada, "checkout", "dbo.v", "dbo.w").exit_code == 0
+    marked = "CREATE VIEW dbo.v AS\n<<<<<<< HEAD\nSELECT 2 AS n;\n=======\nSELECT 3 AS n;\n>>>>>>> origin/main\nGO\n"
+    (team.ada / "database" / "Views" / "dbo.v.sql").write_text(marked, encoding="utf-8")
+    team.db[W] = W2  # a clean change next to it
+    result = run(team.ada, "checkin", "--no-pull", "-m", "w")
+    payload = out(result)
+    # The clean object is committed and released; the half-merged one is neither.
+    assert result.exit_code == 1 and payload["ok"] is False
+    assert [f["object"] for f in payload["files"]] == ["[dbo].[w]"] and payload["commit"]
+    assert [r["object"] for r in payload["released"]] == ["[dbo].[w]"]
+    assert [h["object"] for h in payload["held_back"]] == ["[dbo].[v]"]
+    assert payload["held_back"][0]["action"] == "conflict" and "conflict markers" in payload["held_back"][0]["reason"]
+    assert team.locked_by(V) == ADA and team.locked_by(W) is None
+    assert team.file(team.ada, V) == marked, "the file is left for the person to resolve"
+    # Only conflicts: nothing is committed or released.
+    again = out(run(team.ada, "checkin", "--no-pull"))
+    assert again["ok"] is False and again["commit"] is None and again["released"] == []
+    assert team.locked_by(V) == ADA
+    # --no-commit is the deliberate undo: it releases on purpose.
+    assert run(team.ada, "checkin", "--no-commit").exit_code == 0
+    assert team.locked_by(V) is None
+
+
+# --- #44 unknown checkout ownership is not "nobody has anything checked out" -------------
+
+
+def test_a_commit_stops_when_the_checkouts_cannot_be_read(team, monkeypatch):
+    team.db[V] = V1
+    assert run(team.ada, "commit", "-m", "baseline", "--push").exit_code == 0
+    team.pull(team.bob)
+    assert run(team.ada, "checkout", "dbo.v").exit_code == 0
+    team.db[V] = V2  # Ada's unfinished edit in dev
+    team.db[W] = W1  # Bob's own new object
+
+    def unavailable(repo=None):
+        raise RuntimeError("SELECT permission was denied on the object 'ObjectLock'")
+
+    monkeypatch.setattr(team.locks, "list", unavailable)
+    head = team.head(team.bob)
+    result = run(team.bob, "commit", "-m", "bob")
+    payload = out(result)
+    assert result.exit_code == 2 and payload["ok"] is False and payload["error"]["kind"] == "locks"
+    assert "Checkouts could not be read" in payload["error"]["message"] and "--force" in payload["error"]["message"]
+    assert team.head(team.bob) == head and team.file(team.bob, V) == V1 and team.file(team.bob, W) is None
+    assert team.locked_by(V) == ADA
+    # Status still works and says why the checkouts are unknown, without claiming there are none.
+    status = out(run(team.bob, "status"))
+    assert status["locks"] == [] and any("Checkouts could not be read" in w for w in status["warnings"])
+    # Nothing to commit: no refusal needed, the repo matches.
+    team.db[V] = V1
+    del team.db[W]
+    assert out(run(team.bob, "commit", "-m", "nothing"))["commit"] is None
+    # --force is the deliberate way past it.
+    team.db[W] = W1
+    forced = out(run(team.bob, "commit", "-m", "bob", "--force"))
+    assert forced["commit"] and [f["object"] for f in forced["files"]] == ["[dbo].[w]"]
+
+
+def test_a_bad_lock_target_stops_the_commit_too(team):
+    team.db[V] = V1
+    assert run(team.ada, "commit", "-m", "baseline", "--push").exit_code == 0
+    with (team.ada / "sqlsc.yml").open("a", encoding="utf-8") as f:
+        f.write("locks:\n  target: nowhere\n")
+    team.db[V] = V2
+    result = run(team.ada, "commit", "-m", "edit")
+    payload = out(result)
+    assert result.exit_code == 2 and payload["error"]["kind"] == "locks" and "nowhere" in payload["error"]["message"]
+    assert team.file(team.ada, V) == V1
+    status = out(run(team.ada, "status"))
+    assert any("nowhere" in w for w in status["warnings"])
