@@ -626,7 +626,7 @@ namespace CoopSqlSourceControl
             var pushFailed = result.Json.Value<string>("push_error");
             Say((pushFailed != null ? pushFailed + " " : sha != null ? "Committed as " + sha + (pushedTo != null ? " and pushed " + pushedTo : string.Empty) + ". " : string.Empty)
                 + "Released " + released + " object(s)." + PulledNote(result.Json)
-                + (kept.Count > 0 ? " Still checked out, not committed (changed on both sides or in the repo since your last sync; see Changed in): " + string.Join(", ", kept) + "." : string.Empty)
+                + (kept.Count > 0 ? " Still checked out, not committed (changed on both sides or in the repo since your last sync, or the file has unresolved merge conflict markers; see Changed in): " + string.Join(", ", kept) + "." : string.Empty)
                 + (notMine.Count > 0 ? " Not checked out by you: " + string.Join(", ", notMine) + "." : string.Empty));
         }
 

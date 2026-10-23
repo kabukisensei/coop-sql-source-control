@@ -92,7 +92,7 @@ def repo(tmp_path, monkeypatch):
     conn = Recorder()
     monkeypatch.setattr(cli_mod, "open_connection", lambda target: conn)
     monkeypatch.setattr(cli_mod, "read_database", lambda c, t: CatalogResult(dict(objects), []))
-    monkeypatch.setattr(cli_mod, "_peek_locks", lambda s, u: ({}, "dev@example.com"))
+    monkeypatch.setattr(cli_mod, "_peek_locks", lambda s, u: ({}, "dev@example.com", None))
     git(tmp_path, "init", "-q")
     git(tmp_path, "config", "user.email", "dev@example.com")
     git(tmp_path, "config", "user.name", "Dev")
