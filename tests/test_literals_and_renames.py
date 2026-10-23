@@ -293,3 +293,19 @@ def test_declaration_reader_ignores_names_it_cannot_place():
         "CREATE VIEW db.dbo.v AS SELECT 1;",
         None,
     )
+
+
+# --- GO lines inside literals, quoted names and block comments (#46) ----------------------
+
+
+def test_go_inside_literal_name_or_block_comment_is_not_a_separator():
+    text = "CREATE PROCEDURE dbo.p AS\nSELECT N'first\nGO\nlast' AS value;\nGO\n"
+    assert batches(text) == [text.rsplit("\nGO\n", 1)[0]]
+    mixed = "SELECT [a\nGO\nb] FROM t\n/* x\nGO\n */\nGO -- done\n  go  \nSELECT 'it''s\nGO'\n-- GO\nGO"
+    assert batches(mixed) == ["SELECT [a\nGO\nb] FROM t\n/* x\nGO\n */", "SELECT 'it''s\nGO'\n-- GO"]
+
+
+def test_literal_go_survives_the_deploy_plan():
+    text = "CREATE PROCEDURE dbo.p AS\nSELECT N'first\nGO\nlast' AS value;\nGO\n"
+    plan = build_plan([Change(ObjectKey("procedure", "dbo", "p"), DELETED, None, text)], allow_drops=False)
+    assert [s for step in plan.runnable for s in step.statements] == [text.rsplit("\nGO\n", 1)[0]]

@@ -198,6 +198,16 @@ off each other's work:
   `script`/`commit` will not overwrite the merge, and `checkin` keeps it checked
   out (listed under `held_back` with the reason, exit 1) instead of releasing an
   object it did not commit. Resolve it in git and run again.
+- **A file name that does not fit.** SQL Server allows 128 characters for a
+  schema and 128 for a name, and a file system allows 255 for a file name, so
+  `script` and `commit` check every file name first and refuse with
+  `"error": {"kind": "path"}` naming the objects, before writing anything,
+  rather than failing half-way through with a raw file error. Name the other
+  objects on the command line to leave those out.
+- **`GO` inside a literal is text, not a batch break.** A line reading `GO`
+  inside a string literal, a quoted name or a block comment stays in the
+  statement; only a `GO` line in plain code splits a script into batches
+  (`get-latest`, `deploy`, migrations alike).
 - **Unknown checkouts stop a commit.** When the lock table cannot be read (the
   lock database is down, `SELECT` is denied, `locks: target:` names a target
   that does not exist or cannot hold the table), `status` warns and goes on,

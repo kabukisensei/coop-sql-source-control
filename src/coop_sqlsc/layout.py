@@ -15,9 +15,9 @@ name, are written as %XX so every name maps to exactly one file and back.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from .objects import OBJECT_TYPES, ObjectKey, normalize
+from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey, normalize
 
 _UNSAFE = set('<>:"/\\|?*%') | {chr(c) for c in range(32)}
 
@@ -51,6 +51,33 @@ def _decode(part: str) -> str:
 
 def _is_hex(text: str) -> bool:
     return len(text) == 2 and all(c in "0123456789abcdefABCDEF" for c in text)
+
+
+# The longest file name component NTFS and ext4 accept. SQL Server allows 128
+# characters for a schema and 128 for a name, so `schema.name.sql` can exceed it.
+MAX_FILE_NAME = 255
+
+
+class FileNameTooLong(Exception):
+    """The object's file name is longer than the file system allows."""
+
+    def __init__(self, key: ObjectKey, relative: str) -> None:
+        self.key, self.relative = key, relative
+        super().__init__(
+            f"{TYPE_LABELS.get(key.type, key.type)} {key.display} needs a file name of "
+            f"{_name_length(relative)} characters; the file system allows {MAX_FILE_NAME}."
+        )
+
+
+def _name_length(relative: str) -> int:
+    name = PurePosixPath(relative).name
+    return max(len(name.encode("utf-8")), len(name.encode("utf-16-le")) // 2)
+
+
+def file_name_problem(key: ObjectKey) -> FileNameTooLong | None:
+    """Why the object cannot have a file, or None when its name fits."""
+    relative = relative_path(key)
+    return FileNameTooLong(key, relative) if _name_length(relative) > MAX_FILE_NAME else None
 
 
 def relative_path(key: ObjectKey) -> str:
@@ -117,6 +144,9 @@ def objects_from_files(files: dict[str, str]) -> tuple[dict[ObjectKey, str], lis
 
 
 def write_object(root: Path, key: ObjectKey, script: str) -> Path:
+    problem = file_name_problem(key)
+    if problem:
+        raise problem
     path = root / relative_path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Always LF and UTF-8 without a BOM; .gitattributes decides checkout endings.
