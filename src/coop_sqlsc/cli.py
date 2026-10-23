@@ -39,6 +39,7 @@ from .layout import delete_object, key_for_path, objects_from_files, read_folder
 from .locks import Lock, LockError, LockStore
 from .migrations import BEFORE, Applied, Migration
 from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey
+from .sqltext import same_line_endings
 from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
 
 console = Console(highlight=False)
@@ -209,6 +210,9 @@ def targets(opts: Opts) -> None:
 # --- status / diff / script -------------------------------------------------------
 
 
+NO_PULL_OPTION = click.option(
+    "--no-pull", is_flag=True, help="Do not fetch and fast-forward the branch onto its upstream first."
+)
 AS_OPTION = click.option(
     "--as",
     "as_user",
@@ -233,11 +237,15 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
     sides = _sides(changes)
     held, who = _peek_locks(state, as_user)
     pending = state.pending_migrations()
+    git_info, git_notes = _repo_notes(state.config)
+    state.warnings += git_notes
     emit(
         opts,
         {
             "command": "status",
             **state.header(),
+            "git": git_info,
+            "conflicted": [relative_path(k) for k in sorted(state.conflicted, key=lambda k: k.sort_key)],
             "summary": counts,
             "sides": sides,
             "user": who,
@@ -359,6 +367,7 @@ def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_ru
 @click.option("--message", "-m", help="Commit message (default lists the objects).")
 @click.option("--push", is_flag=True, help="Push the branch after committing.")
 @click.option("--force", is_flag=True, help="Also commit objects someone else has checked out.")
+@NO_PULL_OPTION
 @AS_OPTION
 @click.pass_obj
 def commit(
@@ -368,6 +377,7 @@ def commit(
     message: str | None,
     push: bool,
     force: bool,
+    no_pull: bool,
     as_user: str | None,
 ) -> None:
     """Script the database's changes into the repo and commit just those files.
@@ -376,16 +386,23 @@ def commit(
     So are objects the repo changed since your last sync (a teammate's commit you have
     not applied yet): committing them would overwrite that work with the database's
     older version. Run `sqlsc get-latest` for those, or --force to commit them anyway.
+
+    Before anything is read, the branch is fast-forwarded onto its upstream (a
+    teammate's pushed commits come in first, so the commit builds on them and the
+    push cannot be rejected); --no-pull skips that. A detached HEAD, a merge in
+    progress, unresolved conflicts or a missing git identity stop the commit.
     """
+    git_info = _ready_to_commit(opts, _load_config(opts), pull=not no_pull)
     state = _read_state(opts, target_name)
     differences = state.changes()
     changes = _filter(differences + _uncommitted(state, {c.key for c in differences}), objects)
     held, who = _peek_locks(state, as_user)
     skipped: list[Change] = []
     held_back: list[Change] = []
+    pulled = _just_pulled(changes, git_info)
     if not force:
         skipped = [c for c in changes if c.key in held and not _same_user(held[c.key].locked_by, who)]
-        held_back = [c for c in changes if c not in skipped and not c.from_database]
+        held_back = [c for c in changes if c not in skipped and (not c.from_database or c in pulled)]
         changes = [c for c in changes if c not in skipped and c not in held_back]
     scripts = _uncommitted_migrations(state)
     sha, branch = _commit_changes(opts, state, changes, message, push, scripts)
@@ -396,19 +413,22 @@ def commit(
             "migrations": scripts,
             "setup_files": state.setup_files,
             **state.header(),
+            "git": git_info,
             "commit": sha,
             "pushed": branch,
             "push_error": state.push_error,
             "summary": summarize(changes),
             "files": [c.to_json() for c in changes],
             "skipped": [{**c.to_json(), "locked_by": held[c.key].locked_by} for c in skipped],
-            "held_back": [{**c.to_json(), "reason": _hold_reason(c)} for c in held_back],
+            "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled)} for c in held_back],
             "warnings": state.warnings,
         },
     )
     if opts.as_json:
         return
     _print_header(state)
+    if git_info.get("pulled"):
+        console.print(f"[dim]Pulled {git_info['pulled']} commit(s) from {escape(str(git_info['upstream']))} first.[/]")
     if not sha:
         console.print("[green]✓[/] Nothing to commit; the repo already matches the database.")
     else:
@@ -427,8 +447,66 @@ def commit(
             " (--force commits it anyway)."
         )
     for change in held_back:
-        console.print(f"[yellow]![/] Left {escape(change.key.display)}: {escape(_hold_reason(change))}")
+        console.print(f"[yellow]![/] Left {escape(change.key.display)}: {escape(_hold_reason(change, pulled))}")
     _print_warnings(state.warnings)
+
+
+def _ready_to_commit(opts: Opts, cfg: config_mod.Config, *, pull: bool) -> dict[str, Any]:
+    """Stops, naming the way out, when git cannot take a commit here (not a repository,
+    detached HEAD, merge in progress, unresolved conflicts, no identity); then brings
+    the branch up to date with its upstream so the commit lands on a teammate's work
+    instead of beside it. Runs before the database and the folder are read, so what
+    the pull brought in is compared like anything else. Returns the `git` block."""
+    try:
+        root = git_ops.repo_root(cfg.root)
+    except git_ops.GitError as exc:
+        fail(opts, "git", str(exc))
+        raise
+    try:
+        repo = git_ops.RepoState(root)
+        problem = repo.commit_problem()
+        if problem:
+            fail(opts, "git", f"Not committed: {problem}")
+        pulled, paths = 0, []
+        if pull and repo.upstream:
+            try:
+                pulled, paths = git_ops.pull_fast_forward(root, repo.upstream)
+            except git_ops.GitError as exc:
+                fail(opts, "git", f"Not committed: {exc} Nothing was changed in the database or the files.")
+        pulled_files = [rel for rel in _under(cfg.scripts_dir, root, paths)]
+        return {
+            **repo.to_json(),
+            "pulled": pulled,
+            "pulled_files": pulled_files,
+            "behind": max(repo.behind - pulled, 0),
+        }
+    except git_ops.GitError as exc:
+        fail(opts, "git", str(exc))
+        raise
+
+
+def _under(folder: Path, root: Path, paths: list[str]) -> list[str]:
+    """Of paths relative to the repo root, those under folder, made relative to it."""
+    prefix = folder.resolve().relative_to(root.resolve()).as_posix()
+    prefix = "" if prefix == "." else prefix + "/"
+    return [p[len(prefix) :] for p in paths if p.startswith(prefix)]
+
+
+def _just_pulled(changes: list[Change], git_info: dict[str, Any]) -> list[Change]:
+    """Changes whose file the pull just brought in and whose side nobody can tell (a
+    fresh clone has no sync record): the repo moved, so commit must not write the
+    database's text over a teammate's commit it has only just received."""
+    pulled = set(git_info.get("pulled_files") or [])
+    return [c for c in changes if c.origin == UNKNOWN and c.path in pulled]
+
+
+def _repo_notes(cfg: config_mod.Config) -> tuple[dict[str, Any] | None, list[str]]:
+    """The `git` block and warnings status shows; nothing when the folder is not a repository."""
+    try:
+        repo = git_ops.RepoState(git_ops.repo_root(cfg.root))
+    except git_ops.GitError:
+        return None, []
+    return repo.to_json(), repo.warnings()
 
 
 def _commit_changes(
@@ -834,6 +912,7 @@ def checkout(
 @click.option("--message", "-m", help="Commit message (default lists the objects).")
 @click.option("--push", is_flag=True, help="Push the branch after committing.")
 @click.option("--no-commit", is_flag=True, help="Only release the checkouts (undo checkout); commit nothing.")
+@NO_PULL_OPTION
 @AS_OPTION
 @click.pass_obj
 def checkin(
@@ -843,11 +922,17 @@ def checkin(
     message: str | None,
     push: bool,
     no_commit: bool,
+    no_pull: bool,
     as_user: str | None,
 ) -> None:
-    """Commit the objects you checked out and release them (all of yours when none are named)."""
+    """Commit the objects you checked out and release them (all of yours when none are named).
+
+    Like commit, it pulls first (--no-pull skips that) and stops on a detached HEAD, a merge
+    in progress, unresolved conflicts or a missing git identity.
+    """
     cfg = _load_config(opts)
     target = _target(opts, cfg, target_name)
+    git_info = _ready_to_commit(opts, cfg, pull=not no_pull) if not no_commit else {}
     with _lock_session(opts, cfg, target, as_user) as session:
         mine = [lock for lock in _guarded(opts, lambda: session.store.list(session.repo)) if session.owns(lock)]
         chosen = [lock for lock in mine if not objects or any(matches(lock.key, o) for o in objects)]
@@ -857,14 +942,16 @@ def checkin(
         changes: list[Change] = []
         held_back: list[Change] = []
         state = None
+        pulled: list[Change] = []
         if keys and not no_commit:
             state = _read_state(opts, target.name)
             wanted = set(keys)
             differences = state.changes()
             pending = _uncommitted(state, {c.key for c in differences})
             changes = [c for c in differences + pending if c.key in wanted]
-            held_back = [c for c in changes if not c.from_database]
-            changes = [c for c in changes if c.from_database]
+            pulled = _just_pulled(changes, git_info)
+            held_back = [c for c in changes if not c.from_database or c in pulled]
+            changes = [c for c in changes if c not in held_back]
             sha, branch = _commit_changes(opts, state, changes, message, push)
         # What was held back is not in git yet: it stays checked out, so nobody else
         # edits it while the conflict is sorted out. --no-commit releases on purpose.
@@ -876,12 +963,13 @@ def checkin(
     payload = {
         "command": "checkin",
         **session.header(),
+        "git": git_info,
         "commit": sha,
         "pushed": branch,
         "push_error": state.push_error if state is not None else None,
         "files": [c.to_json() for c in changes],
         "released": [_key_json(k) for k in released],
-        "held_back": [{**c.to_json(), "reason": _hold_reason(c)} for c in held_back],
+        "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled)} for c in held_back],
         "not_checked_out": list(unknown),
         "warnings": state.warnings if state is not None else [],
     }
@@ -904,7 +992,7 @@ def checkin(
         for change in held_back:
             console.print(
                 f"[yellow]![/] Kept {escape(change.key.display)} checked out, not committed: "
-                f"{escape(_hold_reason(change))}"
+                f"{escape(_hold_reason(change, pulled))}"
             )
         for name in unknown:
             console.print(f"[yellow]![/] {escape(name)} is not checked out by {escape(session.who)}.")
@@ -1226,6 +1314,9 @@ class State:
     warnings: list[str]
     # Objects whose file matches the database but not HEAD (see _uncommitted).
     uncommitted: set[ObjectKey] = field(default_factory=set)
+    # Objects whose file still carries merge conflict markers: left out of every
+    # comparison until the merge is resolved (see _read_state).
+    conflicted: set[ObjectKey] = field(default_factory=set)
     push_error: str | None = None
     setup_files: list[str] = field(default_factory=list)  # sqlsc.yml and friends, taken along by a commit
     # What this working copy and the target last agreed on (see sync.py).
@@ -1284,6 +1375,16 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
     if not target.caps["tables"]:
         warnings.append(f"{target.label} tables are not scripted (they are read-only from SQL).")
     folder = {k: v for k, v in folder.items() if _tracks(target, k)}
+    # A half-merged file is not the repo's version of the object: get-latest would run
+    # the markers as SQL and commit would overwrite the merge with the database's text.
+    # Until it is resolved the object is out of every comparison, and status says so.
+    conflicted = {k for k, text in folder.items() if git_ops.has_conflict_markers(text)}
+    for key in conflicted:
+        folder.pop(key)
+        warnings.append(
+            f"{relative_path(key)} has unresolved merge conflict markers, so {key.display} was left out of the "
+            "comparison. Resolve the conflict and `git add` the file, then run again."
+        )
     spinner = nullcontext() if opts.as_json else err_console.status(f"Reading {target.label} '{target.name}'…")
     try:
         with spinner:
@@ -1291,6 +1392,8 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
             try:
                 result = read_database(conn, target)
                 result.objects = _in_scope(target, result.objects)
+                for key in conflicted:
+                    result.objects.pop(key, None)
                 result.warnings += _read_static_data(
                     conn, target, [k for k in folder if k.type == "data"], result.objects
                 )
@@ -1337,6 +1440,7 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         applied=applied,
         history_error=history_error,
         dependencies=dependencies,
+        conflicted=conflicted,
     )
 
 
@@ -1410,8 +1514,13 @@ def _both_text(change: Change) -> str:
     return "changed in the database and in the repo since your last sync"
 
 
-def _hold_reason(change: Change) -> str:
+def _hold_reason(change: Change, just_pulled: list[Change] | None = None) -> str:
     """Why commit leaves an object alone."""
+    if just_pulled and change in just_pulled:
+        return (
+            "the pull just brought this file in from a teammate's commit and this working copy has no sync "
+            "record for it yet; `sqlsc get-latest` applies it (--force commits the database's version instead)"
+        )
     if change.origin == BOTH and change.action != CHANGED:
         return f"{_both_text(change)}; diff it, then --force to commit the database's side"
     if change.origin == BOTH:
@@ -1539,12 +1648,20 @@ def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
             found.append(Change(key, DELETED, None, None, DATABASE))
         elif key in state.folder:
             text = state.folder[key]
+            if how == "modified" and _only_line_endings_differ(root, state.scripts_dir, rel, text):
+                continue  # an editor changed the line-ending style; git normalizes it away on add
             found.append(Change(key, NEW if how == "added" else CHANGED, text, text, DATABASE))
         else:
             continue
         state.uncommitted.add(key)
     found.sort(key=lambda c: c.key.sort_key)
     return found
+
+
+def _only_line_endings_differ(root: Path, folder: Path, rel: str, text: str) -> bool:
+    prefix = folder.resolve().relative_to(root.resolve()).as_posix()
+    at_head = git_ops.head_text(root, rel if prefix == "." else f"{prefix}/{rel}")
+    return at_head is not None and same_line_endings(at_head).strip() == same_line_endings(text).strip()
 
 
 def _filter(changes: list[Change], objects: tuple[str, ...]) -> list[Change]:

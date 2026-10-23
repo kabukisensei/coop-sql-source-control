@@ -57,10 +57,10 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, plus object files written but not committed yet (from `script`, `data add` or an applied edit), which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
-| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes` and `.gitignore` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes` and `.gitignore` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch. It fast-forwards the branch onto its upstream first and stops on a detached HEAD, a merge in progress, unresolved conflicts or a missing git identity (see *Working as a team*); `--no-pull` skips the pull |
 | `sqlsc get-latest [objects…]` | Changes the database to match the repo, running any migration scripts it has not had yet; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
-| `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them; `--no-commit` only releases them |
+| `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them, pulling first like `commit` (`--no-pull` skips that); `--no-commit` only releases them |
 | `sqlsc locks` | Lists who has what checked out; `--mine` for yours, `--all-repos` for every repo sharing the lock table |
 | `sqlsc unlock objects…` | Releases checkouts without committing; someone else's need `--force` |
 | `sqlsc guard install\|remove\|status` | The optional edit guard (see below) |
@@ -166,6 +166,48 @@ and `get-latest` leaves Database and Both objects alone, each saying why; in
 `--json` they are listed under `held_back` and `kept`. An object never seen in
 sync (a fresh clone, or a difference older than the record) has no side, and
 both commands treat it the way they always did.
+
+## Working as a team
+
+Several people (and coop) share one dev database and one repo; what keeps them
+off each other's work:
+
+- **Checkouts** (below) say who is editing what. `commit` leaves objects someone
+  else has checked out to them, and coop checks out before it edits.
+- **The sync record** (above) tells which side moved. `commit` never writes the
+  database's text over a change the repo made since your last sync, and
+  `get-latest` never writes the repo's text over a change the database made.
+  An object that moved on both sides is held back by both until someone runs a
+  `diff` and picks a side with `--force`.
+- **Pull first.** `commit` and `checkin` fetch the branch's upstream and
+  fast-forward onto it before they read anything, so a teammate's pushed commit
+  is in your clone before yours is made: a file the pull just changed is held
+  back for `get-latest` even in a fresh clone that has no sync record yet, and a
+  later `--push` cannot be rejected as non-fast-forward. When the branch cannot
+  fast-forward (you have commits of your own too, or a hand edit would be
+  overwritten), the commit stops and says what to run; `--no-pull` commits
+  anyway, and a rejected push then says to `git pull` and `git push`.
+- **git states that would lose the commit stop it**: a detached HEAD, a merge,
+  rebase or cherry-pick in progress, files still marked conflicted, or a repo
+  where `user.name`/`user.email` are not set. `status` warns about them (and
+  about a branch that is behind its upstream, as last fetched) under `warnings`
+  and `git` in `--json`.
+- **A half-merged object file** (one that still has `<<<<<<<` / `>>>>>>>`
+  conflict markers) is left out of every comparison, with a warning and under
+  `conflicted` in `--json`: `get-latest` will not run the markers as SQL and
+  `script`/`commit` will not overwrite the merge. Resolve it in git and run
+  again.
+- **Only its own files.** `commit` stages and commits the object files it wrote
+  (plus `sqlsc.yml`, `.gitattributes`, `.gitignore` and `Migrations/` scripts
+  when they changed); anything else you have staged or edited stays as it was.
+  Two sqlsc runs at once in one clone (the SSMS window and coop) wait for each
+  other on git's `index.lock`.
+- **Line endings never count**: `init` writes `*.sql text` so git stores LF and
+  checks out the machine's style, comparisons ignore CR/LF, and an object file
+  whose only change is its line-ending style is not reported as uncommitted.
+- git is run without prompts (`GIT_TERMINAL_PROMPT=0`, no interactive
+  credentials): a remote that needs a sign-in fails at once with the reason,
+  instead of hanging the SSMS window.
 
 ## How get-latest changes a database
 

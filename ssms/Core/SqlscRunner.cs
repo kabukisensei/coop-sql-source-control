@@ -81,43 +81,47 @@ namespace CoopSqlSourceControl.Core
 
         public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(10);
 
-        /// <summary>
-        /// sqlsc as configured, else on PATH, else where pipx puts it by default.
-        /// Returns null when it cannot be found.
-        /// </summary>
+        /// <summary>Where sqlsc is: see SqlscLocation.Find. Returns null when it cannot be found.</summary>
         public static string Find(string configured)
         {
-            if (!string.IsNullOrWhiteSpace(configured))
-            {
-                return File.Exists(configured) ? configured : null;
-            }
+            var found = SqlscLocation.Find(configured);
+            return found == null ? null : found.Path;
+        }
 
-            var names = new[] { "sqlsc.exe", "coop-sqlsc.exe", "sqlsc" };
-            var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            foreach (var folder in path.Split(Path.PathSeparator).Where(f => f.Trim().Length > 0))
+        /// <summary>The version `sqlsc --version` prints, or null when it did not answer.</summary>
+        public async Task<string> VersionAsync(CancellationToken cancellationToken)
+        {
+            var start = new ProcessStartInfo(executable, "--version")
             {
-                foreach (var name in names)
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+            };
+            start.EnvironmentVariables["NO_COLOR"] = "1";
+            using (var process = new Process { StartInfo = start })
+            {
+                try
                 {
-                    string candidate;
-                    try
-                    {
-                        candidate = Path.Combine(folder.Trim().Trim('"'), name);
-                    }
-                    catch (ArgumentException)
-                    {
-                        continue;
-                    }
-
-                    if (File.Exists(candidate))
-                    {
-                        return candidate;
-                    }
+                    process.Start();
                 }
-            }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    return null;
+                }
 
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var pipx = Path.Combine(home, ".local", "bin", "sqlsc.exe");
-            return File.Exists(pipx) ? pipx : null;
+                var stdout = process.StandardOutput.ReadToEndAsync();
+                var exited = Task.Run(() => process.WaitForExit(30000));
+                var finished = await Task.WhenAny(exited, Task.Delay(System.Threading.Timeout.Infinite, cancellationToken)).ConfigureAwait(false);
+                if (finished != exited || !exited.Result)
+                {
+                    TryKill(process);
+                    return null;
+                }
+
+                return SqlscLocation.ParseVersion(await stdout.ConfigureAwait(false));
+            }
         }
 
         public static IList<string> Arguments(string configPath, IEnumerable<string> command)

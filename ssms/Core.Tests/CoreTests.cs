@@ -163,6 +163,16 @@ namespace CoopSqlSourceControl.Core.Tests
         }
 
         [Fact]
+        public void DropsReposWhoseFolderIsGone()
+        {
+            var settings = new Settings();
+            settings.Remember("/gone/sqlsc.yml", "dev");
+            settings.Remember("/here/sqlsc.yml", "dev");
+            Assert.Equal(new[] { "/gone/sqlsc.yml" }, settings.Prune(p => p == "/here/sqlsc.yml"));
+            Assert.Equal(new[] { "/here/sqlsc.yml" }, settings.Recent.Select(r => r.ConfigPath));
+        }
+
+        [Fact]
         public void KeepsTenRecentRepos()
         {
             var settings = new Settings();
@@ -173,6 +183,93 @@ namespace CoopSqlSourceControl.Core.Tests
 
             Assert.Equal(Settings.MaxRecent, settings.Recent.Count);
             Assert.Equal("/repo14/sqlsc.yml", settings.Recent[0].ConfigPath);
+        }
+    }
+
+    public class LocationTests
+    {
+        private static readonly string Home = Path.Combine(Path.GetTempPath(), "home");
+        private static readonly string Coop = Path.Combine(Home, ".local", "bin", "sqlsc.exe");
+        private static readonly string OnPath = Path.Combine(Path.GetTempPath(), "tools", "sqlsc.exe");
+        private static readonly string Venv = Path.Combine(Path.GetTempPath(), "venv", "Scripts", "sqlsc.exe");
+        private static readonly string PathVariable = Path.Combine(Path.GetTempPath(), "tools");
+
+        [Fact]
+        public void CoopsInstallWinsOverPathAndOverAChosenVenv()
+        {
+            var all = new[] { Coop, OnPath, Venv };
+            var found = SqlscLocation.Find(Venv, p => all.Contains(p), PathVariable, Home);
+            Assert.Equal(Coop, found.Path);
+            Assert.Equal(SqlscLocation.CoopInstall, found.Source);
+        }
+
+        [Fact]
+        public void PathComesNextAndAChosenPathIsTheLastResort()
+        {
+            var onPath = SqlscLocation.Find(Venv, p => p == OnPath || p == Venv, PathVariable, Home);
+            Assert.Equal(OnPath, onPath.Path);
+            Assert.Equal(SqlscLocation.OnPath, onPath.Source);
+
+            var chosen = SqlscLocation.Find(Venv, p => p == Venv, PathVariable, Home);
+            Assert.Equal(Venv, chosen.Path);
+            Assert.Equal(SqlscLocation.Chosen, chosen.Source);
+
+            // A chosen path whose file is gone finds nothing, instead of a stale venv.
+            Assert.Null(SqlscLocation.Find(Venv, p => false, PathVariable, Home));
+            Assert.Null(SqlscLocation.Find(null, p => false, null, null));
+        }
+
+        [Fact]
+        public void ReadsTheVersionAndNoticesAMismatch()
+        {
+            Assert.Equal("1.0.4", SqlscLocation.ParseVersion("sqlsc, version 1.0.4\n"));
+            Assert.Null(SqlscLocation.ParseVersion("usage: sqlsc"));
+            Assert.False(SqlscLocation.Mismatch("1.0.4", "1.0.5"));
+            Assert.True(SqlscLocation.Mismatch("1.1.0", "1.0.5"));
+            Assert.True(SqlscLocation.Mismatch(null, "1.0.5"));
+
+            var location = new SqlscLocation(Coop, SqlscLocation.CoopInstall);
+            Assert.Equal("sqlsc 1.0.4 from coop's install: " + Coop, location.Describe("1.0.4", "1.0.4"));
+            Assert.Contains("run `coop update`", location.Describe("0.9.0", "1.0.4"));
+            Assert.Contains("(version unknown)", location.Describe(null, "1.0.4"));
+        }
+    }
+
+    public class CommitPlanTests
+    {
+        private static ChangeInfo Row(string origin, string lockedBy = null, bool mine = false, string action = "changed")
+        {
+            return new ChangeInfo { Action = action, Type = "view", Object = "[dbo].[" + origin + "]", Origin = origin, LockedBy = lockedBy, IsMine = mine };
+        }
+
+        [Fact]
+        public void CountsOnlyWhatSqlscWillCommit()
+        {
+            var plan = new CommitPlan(new[]
+            {
+                Row("database"),
+                Row("unknown"),
+                Row("database", "ada@example.com", mine: true),
+                Row("repo"),
+                Row("both"),
+                Row("database", "bob@example.com"),
+            });
+            Assert.Equal(3, plan.Committable.Count);
+            Assert.Equal(2, plan.HeldBack.Count);
+            Assert.Single(plan.CheckedOutByOthers);
+            Assert.Equal("Commit every committable change (3) from dev?\n\n2 are left out because the repo changed them (1 on both sides); "
+                + "Get latest applies the repo's version, Diff shows it; 1 is checked out by bob@example.com.", plan.Question("dev", true));
+            Assert.StartsWith("Commit 3 change(s) from dev?", plan.Question("dev", false));
+        }
+
+        [Fact]
+        public void NothingToAskWhenNothingCanBeCommitted()
+        {
+            var plan = new CommitPlan(new[] { Row("repo") });
+            Assert.Null(plan.Question("dev", true));
+            Assert.Equal("Nothing to commit from dev: 1 is left out because the repo changed it; Get latest applies the repo's version, Diff shows it.",
+                plan.NothingToCommit("dev"));
+            Assert.Equal("Nothing to commit from dev: nothing differs.", new CommitPlan(new ChangeInfo[0]).NothingToCommit("dev"));
         }
     }
 

@@ -39,28 +39,80 @@ namespace CoopSqlSourceControl
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
             Loaded -= OnLoaded;
-            if (FindSqlsc() == null)
+            // Repos whose folder is gone (a deleted clone, another session's temporary
+            // folder) leave the list, so it only offers what can be opened.
+            if (settings.Prune(File.Exists).Count > 0)
+            {
+                SaveSettings();
+            }
+
+            var exe = FindSqlsc();
+            if (exe == null)
             {
                 return;
             }
 
+            await DescribeSqlscAsync(exe);
             ShowRecent();
-            var last = settings.Recent.FirstOrDefault(r => File.Exists(r.ConfigPath));
+            var last = settings.Recent.FirstOrDefault();
             if (last != null)
             {
                 await OpenRepoAsync(last.ConfigPath);
             }
         }
 
+        /// <summary>The add-in's own version, for the line that names the sqlsc in use.</summary>
+        private static string AddinVersion
+        {
+            get
+            {
+                var version = typeof(SourceControlControl).Assembly.GetName().Version;
+                return version == null ? "?" : version.Major + "." + version.Minor + "." + version.Build;
+            }
+        }
+
+        /// <summary>Names the sqlsc in use and its version under the status line.</summary>
+        private async Task DescribeSqlscAsync(string exe)
+        {
+            var location = SqlscLocation.Find(settings.SqlscPath);
+            if (location == null)
+            {
+                SqlscText.Text = string.Empty;
+                return;
+            }
+
+            string version = null;
+            try
+            {
+                version = await new SqlscRunner(exe).VersionAsync(CancellationToken.None);
+            }
+            catch (Exception exc) when (!(exc is OutOfMemoryException))
+            {
+                // The version line is informational; the commands report their own errors.
+            }
+
+            SqlscText.Text = location.Describe(version, AddinVersion);
+        }
+
         // --- repo and target -------------------------------------------------------------
 
         private string FindSqlsc()
         {
+            // A chosen path whose file is gone (an old venv) is forgotten, so it cannot
+            // keep the window from finding coop's install later.
+            if (!string.IsNullOrWhiteSpace(settings.SqlscPath) && !File.Exists(settings.SqlscPath))
+            {
+                settings.SqlscPath = null;
+                SaveSettings();
+            }
+
             var exe = SqlscRunner.Find(settings.SqlscPath);
             LocateButton.Visibility = exe == null ? Visibility.Visible : Visibility.Collapsed;
             if (exe == null)
             {
-                Say("sqlsc was not found. Install it with `pipx install git+https://github.com/kabukisensei/coop-sql-source-control`, "
+                SqlscText.Text = string.Empty;
+                Say("sqlsc was not found. It comes with coop (run `coop update`), or install it with "
+                    + "`pipx install git+https://github.com/kabukisensei/coop-sql-source-control`, "
                     + "or use Find sqlsc… to point to sqlsc.exe.");
             }
 
@@ -75,7 +127,7 @@ namespace CoopSqlSourceControl
             RepoBox.SelectionChanged += OnRepoChanged;
         }
 
-        private void OnLocateSqlsc(object sender, RoutedEventArgs e)
+        private async void OnLocateSqlsc(object sender, RoutedEventArgs e)
         {
             var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Find sqlsc.exe", Filter = "sqlsc|sqlsc.exe;coop-sqlsc.exe|Programs|*.exe" };
             if (dialog.ShowDialog() != true)
@@ -85,9 +137,11 @@ namespace CoopSqlSourceControl
 
             settings.SqlscPath = dialog.FileName;
             SaveSettings();
-            if (FindSqlsc() != null)
+            var exe = FindSqlsc();
+            if (exe != null)
             {
-                Say("Using " + dialog.FileName + ". Open a repo's sqlsc.yml to start.");
+                await DescribeSqlscAsync(exe);
+                Say("Using " + exe + ". Open a repo's sqlsc.yml to start.");
             }
         }
 
@@ -267,18 +321,29 @@ namespace CoopSqlSourceControl
             }
 
             var selected = SelectedChanges;
-            var affected = selected.Count > 0 ? selected : (ChangesGrid.ItemsSource as IEnumerable<ChangeInfo> ?? Enumerable.Empty<ChangeInfo>()).ToList();
+            var everything = selected.Count == 0;
+            var affected = everything ? (ChangesGrid.ItemsSource as IEnumerable<ChangeInfo> ?? Enumerable.Empty<ChangeInfo>()).ToList() : selected;
+            // The question counts what sqlsc will commit: rows someone else has checked out
+            // and rows the repo moved are named as left out, not counted (dev VM finding 3).
+            // With no rows at all the command still runs: it may owe git a migration script
+            // or sqlsc.yml, and says "Nothing to commit" otherwise.
+            var plan = new CommitPlan(affected);
+            if (affected.Count > 0 && plan.Committable.Count == 0)
+            {
+                Say(plan.NothingToCommit(Target.Name));
+                return;
+            }
+
             // "Deleted" means the repo has the object and the database does not. When sqlsc knows
             // the object was synced here before, that is a drop and the file goes; when it has
             // never seen it (a teammate's new object), sqlsc leaves it for Get latest. Only the
             // ones it cannot tell apart need a warning.
-            var deletions = affected.Count(c => c.Action == "deleted" && c.Origin != "repo" && c.Origin != "database");
+            var deletions = plan.Committable.Count(c => c.Action == "deleted" && c.Origin != "repo" && c.Origin != "database");
             var warning = deletions == 0 ? string.Empty
                 : Environment.NewLine + Environment.NewLine + deletions + " of them would delete the object's file from the repo, because "
                     + Target.Name + " does not have it. If it is new from the repo and not applied yet, use Get latest instead.";
-            if ((selected.Count == 0 || deletions > 0)
-                && !Confirm((selected.Count == 0 ? "Commit every change (" + Count(ChangesGrid) + ") from " : "Commit " + selected.Count + " change(s) from ")
-                    + Target.Name + "?" + warning))
+            var question = plan.Question(Target.Name, everything);
+            if (question != null && (everything || deletions > 0 || plan.LeftOut.Length > 0) && !Confirm(question + warning))
             {
                 return;
             }
@@ -302,6 +367,7 @@ namespace CoopSqlSourceControl
             var pushed = result.Json.Value<string>("pushed");
             var pushError = result.Json.Value<string>("push_error");
             Say((pushError ?? (sha == null ? "Nothing to commit." : "Committed as " + sha + (pushed != null ? " and pushed " + pushed : string.Empty) + "."))
+                + PulledNote(result.Json)
                 + (skipped.Count > 0 ? " Left for whoever has them checked out: " + string.Join(", ", skipped) + "." : string.Empty)
                 + (heldBack.Count > 0 ? " Left because the repo changed them since your last sync (see Changed in; Get latest applies them): " + string.Join(", ", heldBack) + "." : string.Empty));
         }
@@ -559,7 +625,7 @@ namespace CoopSqlSourceControl
             var pushedTo = result.Json.Value<string>("pushed");
             var pushFailed = result.Json.Value<string>("push_error");
             Say((pushFailed != null ? pushFailed + " " : sha != null ? "Committed as " + sha + (pushedTo != null ? " and pushed " + pushedTo : string.Empty) + ". " : string.Empty)
-                + "Released " + released + " object(s)."
+                + "Released " + released + " object(s)." + PulledNote(result.Json)
                 + (kept.Count > 0 ? " Still checked out, not committed (changed on both sides or in the repo since your last sync; see Changed in): " + string.Join(", ", kept) + "." : string.Empty)
                 + (notMine.Count > 0 ? " Not checked out by you: " + string.Join(", ", notMine) + "." : string.Empty));
         }
@@ -656,9 +722,12 @@ namespace CoopSqlSourceControl
             return changes.Select(c => c.Name).Distinct().ToList();
         }
 
-        private static int Count(DataGrid grid)
+        /// <summary>" Pulled 2 commit(s) from origin/main first." when commit or checkin fast-forwarded the branch.</summary>
+        private static string PulledNote(JObject json)
         {
-            return grid.Items.Count;
+            var git = json["git"] as JObject;
+            var pulled = git?.Value<int?>("pulled") ?? 0;
+            return pulled > 0 ? " Pulled " + pulled + " commit(s) from " + git.Value<string>("upstream") + " first." : string.Empty;
         }
 
         private static string Warnings(JObject json)
