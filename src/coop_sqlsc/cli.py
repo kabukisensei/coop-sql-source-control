@@ -195,7 +195,7 @@ def init(
             "folder": folder,
             "target": target_name,
             **filters,
-            "sqlproj": project,
+            **({"sqlproj": project} if project else {}),
         },
     )
     if not opts.as_json:
