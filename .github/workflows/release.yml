@@ -84,7 +84,7 @@ jobs:
     # changelog to this release (coop-website/.github/workflows/sync-release.yml;
     # needs the COOP_WEBSITE_TOKEN secret here, else it prints the command to run
     # by hand and succeeds). A person reviews and merges that PR and pulls on the VPS.
-    needs: [release]
+    needs: [cli, release]
     uses: kabukisensei/coop-website/.github/workflows/sync-release.yml@main
     with:
       product: coop-sql-source-control
