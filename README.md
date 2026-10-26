@@ -448,6 +448,15 @@ See [docs/coop-agent.md](docs/coop-agent.md).
 
 ## Develop
 
+Releasing the package: bump `__version__` in `src/coop_sqlsc/__init__.py` (the one
+place the version is written), merge, then push the matching `vX.Y.Z` tag or run
+the Release workflow by hand with that tag. `.github/workflows/release.yml` checks
+the tag against `__version__`, builds the wheel and the SSMS add-in, attaches both
+to a GitHub Release, then calls coop-website's `sync-release.yml`, which opens the
+site's sync pull request (needs a `COOP_WEBSITE_TOKEN` secret here; without one it
+prints the command to run by hand). Releases happen only when Aaron asks for one
+and names the version.
+
 ```bash
 pip install -e ".[dev]" ruff
 ruff check src tests && ruff format --check src tests
