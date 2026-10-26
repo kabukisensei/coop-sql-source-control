@@ -29,6 +29,8 @@ coop-agent and CI always agree.
   *Working as a team* in the main README for every rule). When the repo has migration scripts the
   database has not run, the status line says so and Get latest's question
   names them.
+  Check out and Check in are optional: a team can work with Commit and Get
+  latest alone (see *Checkout and check-in* in the main README).
 - **Checkouts**: everything checked out in this repo. **Check in** commits and
   releases, **Undo checkout** releases without committing, and **Release…**
   takes someone else's checkout away (`sqlsc unlock --force`).

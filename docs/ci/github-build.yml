@@ -1,0 +1,30 @@
+# Compile check: build the SQL project sqlsc wrote (`sqlsc sqlproj`) on every pull
+# request. A bad script or a missing reference fails the build; the dacpac is never
+# published (sqlsc get-latest and deploy apply the repo). Copy to
+# .github/workflows/sql-build.yml in the SQL repository and set FOLDER.
+name: SQL build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  FOLDER: database   # the `folder:` in sqlsc.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build the dacpac (compile only)
+        run: dotnet build "$FOLDER" --nologo -warnaserror:false
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dacpac
+          path: ${{ env.FOLDER }}/bin/**/*.dacpac
+          if-no-files-found: ignore

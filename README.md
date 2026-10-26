@@ -14,6 +14,15 @@ It is part of the coop suite: a Python CLI installed with pipx like
 `coop-data-doc`, readable for people, and `--json` on every command for
 coop-agent, CI and the SSMS add-in.
 
+**Nothing is locked in.** The repo sqlsc keeps is plain git: one `.sql` file per
+object, deterministic text, no metadata of its own in the history (the sync record
+under `.sqlsc/` is ignored, checkouts live in a table in the database). If sqlsc
+stopped tomorrow, the repo would still be the whole database as files: SSMS
+Generate Scripts, SqlPackage Extract or a Fabric Git export produce the same shape,
+git history, blame and pull requests keep working, and a schema compare (coop's or
+SSMS's) still deploys. Checkouts, the sync record, migrations and static data are
+optional on top; none of them has to be used.
+
 ## Install
 
 From a release (the `.whl` on the [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)):
@@ -52,15 +61,16 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 
 | Command | What it does |
 | --- | --- |
-| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*) |
+| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*); `--sqlproj` also writes the SQL project (see *Compile check*) |
+| `sqlsc sqlproj` | Writes a SQL project over the scripts folder so `dotnet build` compiles the repo (see *Compile check*); `--name`, `--force` |
 | `sqlsc targets` | Lists the databases the repo can talk to |
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, plus object files written but not committed yet (from `script`, `data add` or an applied edit), which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
-| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes` and `.gitignore` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch. It fast-forwards the branch onto its upstream first and stops on a detached HEAD, a merge in progress, unresolved conflicts or a missing git identity (see *Working as a team*); `--no-pull` skips the pull |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes` and `.gitignore` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch; `--prepared-by TEXT` (or an `<agent>:<person>` `--as` name) adds a `Prepared-by:` trailer naming the agent that prepared the change (see *Who prepared a change*). It fast-forwards the branch onto its upstream first and stops on a detached HEAD, a merge in progress, unresolved conflicts or a missing git identity (see *Working as a team*); `--no-pull` skips the pull |
 | `sqlsc get-latest [objects…]` | Changes the database to match the repo, running any migration scripts it has not had yet; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
-| `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them, pulling first like `commit` (`--no-pull` skips that); `--no-commit` only releases them |
+| `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them, pulling first like `commit` (`--no-pull` skips that); `--no-commit` only releases them; a checkout an agent took for you gives the commit a `Prepared-by:` trailer |
 | `sqlsc locks` | Lists who has what checked out; `--mine` for yours, `--all-repos` for every repo sharing the lock table |
 | `sqlsc unlock objects…` | Releases checkouts without committing; someone else's need `--force` |
 | `sqlsc guard install\|remove\|status` | The optional edit guard (see below) |
@@ -285,6 +295,34 @@ need `locks: target:`. The `sqlsc` schema is never scripted or compared.
   shows them as *you (coop-agent)*, and your `checkin` commits and releases them,
   so you review the agent's change and check it in. The agent cannot take yours.
 
+Checkouts are optional. A team that never checks anything out loses nothing
+else: `commit` and `get-latest` still refuse to write over a change the other side
+made since the last sync (see *Which side changed*), and no lock table is created
+until the first `checkout`. Use them when two people are likely to edit the same
+object in the same week; skip them while a team is getting used to the files.
+
+### Who prepared a change
+
+A commit is authored by the person whose git identity made it, since they reviewed
+it. When an agent prepared the change, the commit says so in a git trailer, its last
+paragraph:
+
+```
+Change dbo.vSales to read the new column
+
+Prepared-by: coop-agent 0.38.6
+```
+
+`commit` and `checkin` add it when `--prepared-by TEXT` (or `SQLSC_PREPARED_BY`)
+names the agent, when the `--as` name has the `<agent>:<person>` form
+(`coop-agent:ada@example.com` gives `Prepared-by: coop-agent`), and, for `checkin`,
+when any object checked in was checked out by an agent for you. A person's own
+commit carries no trailer. `git log --format='%h %an %s%n%(trailers:key=Prepared-by)'`
+is then the change log of who did what, person and agent both, and
+`git log --grep='^Prepared-by:'` lists what an agent prepared. The trailer is a
+commit's, never a comment in the object: the scripts stay exactly what the database
+holds.
+
 **The edit guard** (`sqlsc guard install`) goes further on SQL Server, Azure SQL
 and Fabric SQL database: a database-level DDL trigger rolls back an `ALTER`,
 `DROP` or index change to an object that a different login has checked out, and
@@ -339,6 +377,50 @@ ran it; `sqlsc history` reads that table. On transactional targets that row is
 part of the release's transaction: a release that cannot be recorded is rolled
 back. Drops still need `--allow-drops`, and
 changes `ALTER` cannot make safely are still held back with the reason.
+
+## Compile check
+
+`sqlsc sqlproj` (or `sqlsc init --sqlproj`) writes `<folder>/<database>.sqlproj`, an
+SDK-style SQL project (`Microsoft.Build.Sql`) over the scripts folder: every object
+file is in it, `Data/` and `Migrations/` are not, and the target platform follows
+the target's kind (SQL Server, Azure SQL and Fabric SQL database, Fabric Warehouse,
+or the serverless endpoint for a Lakehouse and Synapse). Then
+
+```powershell
+dotnet build database
+```
+
+compiles the repo into a dacpac and fails on bad syntax or a reference to an object
+that is not there, before anything touches a database. Nobody publishes the dacpac:
+`get-latest` and `deploy` stay the way changes reach a database, and the build is
+the check in front of them. It needs the .NET SDK (`winget install Microsoft.DotNet.SDK.8`)
+and restores the SDK package from NuGet on the first build. `bin/` and `obj/` are
+added to `.gitignore`; the project file is committed and is yours to edit (sqlsc
+never rewrites it unless `--force`). Ready-made pipelines: [docs/ci/github-build.yml](docs/ci/github-build.yml)
+and [docs/ci/azure-pipelines-build.yml](docs/ci/azure-pipelines-build.yml) build it on
+every pull request. A Fabric Warehouse script the build rejects but the Warehouse
+accepts is a DacFx gap: suppress that warning in the project rather than change the
+script.
+
+## Drift and permissions
+
+A change made straight in a database that nobody commits is overwritten by the next
+`get-latest` or `deploy` of the repo, with no conflict to warn anyone. sqlsc shows
+such a change as *Database* in `status`, holds it back from `get-latest`, and
+`sqlsc status --exit-code` reports it from a pipeline
+([docs/ci/github-drift.yml](docs/ci/github-drift.yml) runs it nightly against one
+target, read only, and fails when anything differs); the edit guard stops a live
+edit of a checked-out object where the platform has DDL triggers. None of that
+replaces permissions. The arrangement that works:
+
+| Database | Who can change objects | How changes arrive |
+| --- | --- | --- |
+| dev | developers (SSMS, coop with approval) | edit live, then `commit`; teammates `get-latest` |
+| test | the deployment identity only | `sqlsc deploy -t test` |
+| prod | the deployment identity, plus a break-glass login whose use is logged | `sqlsc deploy -t prod --confirm prod`, or the `--output` script run by a person |
+
+With that in place a drift report on test or prod is a security event, and on dev
+it is a reminder to commit.
 
 ## Migration scripts
 
@@ -492,6 +574,7 @@ column type, and releases by tag to a protected target.
 3. **Checkout and check-in**: a shared lock table, `checkout`, `checkin`, `locks`, `unlock`, and an optional edit guard on SQL Server and Azure SQL.
 4. **Deploy and static data**: `deploy` and `history` for test and prod releases, lookup-table rows as `MERGE` scripts.
 5. **SSMS add-in**: a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
-6. **Migration scripts** (this release): hand-written, run-once scripts around the structural changes.
+6. **Migration scripts**: hand-written, run-once scripts around the structural changes.
+7. **Compile check and the agent's mark** (this release): a SQL project for `dotnet build`, `Prepared-by:` trailers, the drift pipeline.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).

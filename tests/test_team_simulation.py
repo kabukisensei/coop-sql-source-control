@@ -517,3 +517,60 @@ def test_a_bad_lock_target_stops_the_commit_too(team):
     assert team.file(team.ada, V) == V1
     status = out(run(team.ada, "status"))
     assert any("nowhere" in w for w in status["warnings"])
+
+
+# --- who prepared a change: the commit says when an agent did -----------------------------
+
+
+def message(clone: Path) -> str:
+    return git(clone, "log", "-1", "--format=%B").stdout
+
+
+def trailers(clone: Path) -> list[str]:
+    done = subprocess.run(
+        ["git", "interpret-trailers", "--parse"], cwd=clone, input=message(clone), capture_output=True, text=True
+    )
+    return [line.strip() for line in done.stdout.splitlines() if line.strip()]
+
+
+def test_a_commit_coop_prepares_carries_a_prepared_by_trailer_and_the_person_stays_the_author(team):
+    team.db[V] = V1
+    done = out(run(team.ada, "commit", "-m", "add dbo.v", "--as", COOP))
+    assert done["commit"] and done["prepared_by"] == ["coop-agent"]
+    assert trailers(team.ada) == ["Prepared-by: coop-agent"]
+    assert git(team.ada, "log", "-1", "--format=%ae").stdout.strip() == ADA
+    # --prepared-by carries the agent's version (coop-agent passes its own).
+    team.db[V] = V2
+    done = out(run(team.ada, "commit", "-m", "change dbo.v", "--as", COOP, "--prepared-by", "coop-agent 0.38.6"))
+    assert done["prepared_by"] == ["coop-agent 0.38.6"]
+    assert trailers(team.ada) == ["Prepared-by: coop-agent 0.38.6"]
+    assert message(team.ada).startswith("change dbo.v\n\nPrepared-by: coop-agent 0.38.6")
+    # A person's own commit says nothing: no agent, no trailer.
+    team.db[V] = V3
+    done = out(run(team.ada, "commit", "-m", "change dbo.v again"))
+    assert done["commit"] and done["prepared_by"] == []
+    assert trailers(team.ada) == []
+    # Nothing to commit: no trailer claimed either.
+    assert out(run(team.ada, "commit", "-m", "nothing", "--as", COOP))["prepared_by"] == []
+
+
+def test_checking_in_coops_checkout_marks_the_commit_as_prepared_by_coop(team):
+    team.db[V] = V1
+    team.db[W] = W1
+    run(team.ada, "commit", "-m", "baseline", "--push")
+    assert out(run(team.ada, "checkout", "dbo.v", "--as", COOP))["ok"]
+    assert out(run(team.ada, "checkout", "dbo.w"))["ok"]
+    team.db[V] = V2
+    team.db[W] = W2
+    # Ada reviews coop's change and checks both objects in herself: the commit names coop
+    # for the object it prepared, and Ada remains the author.
+    done = out(run(team.ada, "checkin", "-m", "ada checks in"))
+    assert done["commit"] and done["prepared_by"] == ["coop-agent"]
+    assert trailers(team.ada) == ["Prepared-by: coop-agent"]
+    assert team.locked_by(V) is None and team.locked_by(W) is None
+    # Her own checkout alone: no trailer.
+    assert out(run(team.ada, "checkout", "dbo.w"))["ok"]
+    team.db[W] = W1
+    done = out(run(team.ada, "checkin", "-m", "ada alone"))
+    assert done["commit"] and done["prepared_by"] == []
+    assert trailers(team.ada) == []

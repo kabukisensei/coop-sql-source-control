@@ -61,8 +61,11 @@ def repo_root(path: Path) -> Path:
         raise GitError(f"{path} is not inside a git repository. Run `git init` first.") from exc
 
 
-def commit_paths(root: Path, paths: list[Path], message: str) -> str | None:
-    """Stage and commit exactly these paths. Returns the new commit's short hash, or None if nothing changed."""
+def commit_paths(root: Path, paths: list[Path], message: str, trailers: list[str] | None = None) -> str | None:
+    """Stage and commit exactly these paths. Returns the new commit's short hash, or None if nothing changed.
+
+    `trailers` are git trailer lines ("Prepared-by: coop-agent 0.38.6") added as the
+    message's last paragraph, so `git log` and `git interpret-trailers` read them."""
     rel = [str(p.resolve().relative_to(root.resolve())) for p in paths]
     if not rel:
         return None
@@ -70,8 +73,31 @@ def commit_paths(root: Path, paths: list[Path], message: str) -> str | None:
     staged = _git(root, "diff", "--cached", "--name-only", "--", *rel)
     if not staged:
         return None
-    _git(root, "commit", "-m", message, "--only", "--", *rel)
+    extra = ["-m", "\n".join(trailers)] if trailers else []
+    _git(root, "commit", "-m", message, *extra, "--only", "--", *rel)
     return _git(root, "rev-parse", "--short", "HEAD")
+
+
+PREPARED_BY = "Prepared-by"
+
+
+def prepared_by_trailers(names: list[str]) -> list[str]:
+    """One `Prepared-by:` trailer per agent that prepared the change, in order, no repeats."""
+    seen: list[str] = []
+    for name in names:
+        text = " ".join(str(name or "").split())
+        if text and text not in seen:
+            seen.append(text)
+    return [f"{PREPARED_BY}: {name}" for name in seen]
+
+
+def agent_of(user: str | None) -> str | None:
+    """The agent in an `<agent>:<person>` checkout name (`coop-agent:ada@example.com`), else None."""
+    text = (user or "").strip()
+    if ":" not in text:
+        return None
+    agent = text.split(":", 1)[0].strip()
+    return agent or None
 
 
 def uncommitted(root: Path, folder: Path) -> dict[str, str]:
