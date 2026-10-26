@@ -68,7 +68,9 @@ def normalize(text: str) -> str:
     return sqltext.normalize(text)
 
 
-_GO = re.compile(r"^[ \t]*GO[ \t]*(?:--[^\n]*)?$", re.IGNORECASE | re.MULTILINE)
+# sqlcmd's batch separator: `GO`, `GO 3`, `GO;`, with a line comment allowed after it.
+# The same expression as coop-schema-compare's, so both tools cut a file alike.
+_GO = re.compile(r"^[ \t]*GO(?:[ \t]+\d+)?[ \t]*;?[ \t]*(?:--[^\n]*)?$", re.IGNORECASE | re.MULTILINE)
 
 
 def batches(text: str) -> list[str]:

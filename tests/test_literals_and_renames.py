@@ -99,6 +99,12 @@ def test_go_lines_still_split_batches():
     assert batches(script) == ["SET QUOTED_IDENTIFIER OFF", proc_with("'a  \nb'").strip()]
 
 
+def test_go_forms_match_sqlcmd_and_schema_compare():
+    # `GO 3`, `GO;` and `GO -- note` end a batch, as in sqlcmd and coop-schema-compare.
+    assert batches("a\nGO 3\nb\nGO;\nc\nGO -- deploy\nd\ngo\ne") == ["a", "b", "c", "d", "e"]
+    assert batches("SELECT 'x\nGO\ny'\nGO\n/* a\nGO\nb */ SELECT 2") == ["SELECT 'x\nGO\ny'", "/* a\nGO\nb */ SELECT 2"]
+
+
 # --- literals: capture and compare ---------------------------------------------------------
 
 
