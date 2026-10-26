@@ -24,6 +24,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Verify the tag matches the package version
+        # __version__ in src/coop_sqlsc/__init__.py is the one place the version is
+        # written (pyproject.toml reads it); a tag that names another version stops here.
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          tag="${TAG#v}"
+          ver="$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/coop_sqlsc/__init__.py').read_text()).group(1))")"
+          echo "tag=$tag  version=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::Tag v$tag does not match package version $ver; bump __version__ or retag."
+            exit 1
+          fi
       - run: pip install build
       - run: python -m build
       - uses: actions/upload-artifact@v4
