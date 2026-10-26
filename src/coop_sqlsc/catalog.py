@@ -148,10 +148,31 @@ ORDER BY f.parent_object_id, f.name, fc.constraint_column_id
 COLLATION_SQL = "SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS nvarchar(128))"
 
 
+# The object types a catalog facet describes (#50): when the facet's query fails,
+# every object of these types is unread, not "without" the facet.
+_FACET_TYPES = {
+    "collation": ("table",),
+    "schemas": ("schema",),
+    "identity columns": ("table",),
+    "computed columns": ("table",),
+    "defaults": ("table",),
+    "keys": ("table",),
+    "indexes": ("table",),
+    "check constraints": ("table",),
+    "foreign keys": ("table",),
+}
+
+
 @dataclass
 class CatalogResult:
     objects: dict[ObjectKey, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Object types the database could not be read for completely (#50): a catalog
+    # query the platform supports failed, so an index, a constraint or a schema the
+    # database has may be missing from `objects`. {type: why}. Nothing of such a type
+    # is in `objects`: a partial table scripted as the whole would later lose its
+    # index to a commit, and a deploy would then drop it from a healthy database.
+    unread: dict[str, str] = field(default_factory=dict)
 
 
 def read_database(conn: Any, target: Target) -> CatalogResult:
@@ -166,6 +187,9 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
         except Exception as exc:  # pyodbc.Error, kept generic for fakes in tests
             if required:
                 raise
+            why = f"{what} could not be read from {target.label} ({_first_line(exc)})"
+            for obj_type in _FACET_TYPES.get(what, ()):
+                result.unread.setdefault(obj_type, why)
             result.warnings.append(f"Skipped {what}: {target.label} did not answer ({_first_line(exc)}).")
             return []
 
@@ -217,6 +241,12 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
         for table in tables.values():
             key = ObjectKey("table", table.schema, table.name)
             result.objects[key] = script_table(table, database_collation=collation, enforced_keys=caps["enforced_keys"])
+    # A facet the database did not answer for is unknown, not empty: no object of
+    # that type is reported at all, so nothing downstream takes its absence for a
+    # deliberate change (#50).
+    for obj_type in result.unread:
+        for key in [k for k in result.objects if k.type == obj_type]:
+            del result.objects[key]
     return result
 
 

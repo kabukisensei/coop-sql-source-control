@@ -198,6 +198,13 @@ off each other's work:
   `script`/`commit` will not overwrite the merge, and `checkin` keeps it checked
   out (listed under `held_back` with the reason, exit 1) instead of releasing an
   object it did not commit. Resolve it in git and run again.
+- **A catalog read that came back incomplete** (the database answered the
+  object list but not, say, its indexes, keys, constraints, defaults or schemas:
+  a permission, a timeout, a dropped connection) leaves every object of that type
+  out of the comparison on both sides, with a warning and under `unread` in
+  `--json`. A table scripted without the index it has would otherwise be
+  committed as if the index had been dropped, and a later `get-latest` on a
+  healthy database would drop it. Fix the access and run again.
 - **A file name that does not fit.** SQL Server allows 128 characters for a
   schema and 128 for a name, and a file system allows 255 for a file name, so
   `script` and `commit` check every file name first and refuse with
@@ -361,7 +368,10 @@ transactional targets the after scripts share the update's transaction; each
 before script is its own. `commit` takes new and edited scripts along with the
 objects. A script that is edited after a database has run it does not run
 there again; `sqlsc migrations` marks it *edited*, so put the further change
-in a new script. When `sqlsc.Migration` exists but cannot be read (no SELECT
+in a new script. A file name (without `.sql`) is at most 200 characters, what
+`sqlsc.Migration` records: `migrations add` keeps within it, and a whole update
+stops before running anything when a longer one is pending, naming the file to
+rename. When `sqlsc.Migration` exists but cannot be read (no SELECT
 permission, a dropped connection), a whole update stops before changing
 anything, since it cannot tell which scripts already ran; `status` reports
 `history_unknown` and `sqlsc migrations` marks the scripts *unknown*.
