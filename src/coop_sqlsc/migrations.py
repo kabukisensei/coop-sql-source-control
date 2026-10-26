@@ -33,6 +33,10 @@ from .objects import ObjectKey, batches
 
 FOLDER = "Migrations"
 BEFORE, AFTER = "before", "after"
+# sqlsc.Migration's MigrationId is varchar(200): a longer id could not be recorded as
+# it is, and the script would run again on every update (#51). Checked before any
+# migration runs; new_file never makes one.
+MAX_ID = 200
 _WHEN = re.compile(r"^\s*--\s*sqlsc\s*:\s*(before|after)\s*$", re.IGNORECASE | re.MULTILINE)
 
 CREATE_TABLE = """
@@ -138,13 +142,29 @@ def edited(migrations: list[Migration], applied: dict[str, Applied]) -> list[Mig
     return [m for m in migrations if m.id in applied and applied[m.id].checksum != m.checksum]
 
 
+def too_long(migrations: list[Migration]) -> list[Migration]:
+    """Migrations whose id sqlsc.Migration cannot hold (#51): they must not run."""
+    return [m for m in migrations if len(m.id) > MAX_ID]
+
+
+def too_long_text(migrations: list[Migration]) -> str:
+    names = ", ".join(f"{m.path} ({len(m.id)} characters)" for m in migrations)
+    return (
+        f"The name of {names} is longer than the {MAX_ID} characters sqlsc.Migration records, so a run "
+        "could not be recorded and the script would run again on every update. Rename the file "
+        "(git mv) to a shorter name."
+    )
+
+
 def record_sql(migration: Migration, who: str, commit: str | None) -> str:
     def text(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
 
+    if len(migration.id) > MAX_ID:
+        raise ValueError(too_long_text([migration]))
     return (
         "INSERT INTO sqlsc.Migration (MigrationId, AppliedAt, AppliedBy, LoginName, Checksum, CommitId)\n"
-        f"VALUES ({text(migration.id[:200])}, SYSUTCDATETIME(), {text(who[:256])}, SUSER_SNAME(), "
+        f"VALUES ({text(migration.id)}, SYSUTCDATETIME(), {text(who[:256])}, SUSER_SNAME(), "
         f"{text(migration.checksum)}, {text(commit[:40]) if commit else 'NULL'})"
     )
 
@@ -160,6 +180,7 @@ def new_file(root: Path, name: str, when: str = AFTER, now: datetime | None = No
     Stamped to the second so two scripts made in a row run in the order they were made."""
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-") or "migration"
+    slug = slug[: MAX_ID - len(stamp) - 1].rstrip("-")  # the whole id must fit sqlsc.Migration (#51)
     base = root / FOLDER
     base.mkdir(parents=True, exist_ok=True)
     path = base / f"{stamp}_{slug}.sql"

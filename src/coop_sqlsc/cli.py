@@ -254,6 +254,7 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
             **state.header(),
             "git": git_info,
             "conflicted": [relative_path(k) for k in sorted(state.conflicted, key=lambda k: k.sort_key)],
+            "unread": [relative_path(k) for k in sorted(state.unread, key=lambda k: k.sort_key)],
             "summary": counts,
             "sides": sides,
             "user": who,
@@ -673,6 +674,11 @@ def run_update(
     who = who or locks.current_user(state.config.root)
     recorded = False  # a footer run on its own, with no changes (a no-op deploy)
     pending = state.pending_migrations() if not objects else []
+    if unrecordable := migrations_mod.too_long(pending):
+        # Recorded truncated, the script would be pending again next time (#51): stop
+        # before anything runs or is written.
+        why = migrations_mod.too_long_text(unrecordable)
+        fail(opts, "migration", f"{why} {command} stopped before changing anything.")
     before = migration_steps([m for m in pending if m.when == BEFORE], who, commit)
     after = migration_steps([m for m in pending if m.when != BEFORE], who, commit)
     if blocked:
@@ -1373,6 +1379,10 @@ class State:
     # Objects whose file still carries merge conflict markers: left out of every
     # comparison until the merge is resolved (see _read_state).
     conflicted: set[ObjectKey] = field(default_factory=set)
+    # Objects of a type the database could not be read for completely (#50): left
+    # out of every comparison, so a missing index is never committed as a deletion
+    # or deployed as a DROP. {key: why}; status lists them.
+    unread: dict[ObjectKey, str] = field(default_factory=dict)
     push_error: str | None = None
     setup_files: list[str] = field(default_factory=list)  # sqlsc.yml and friends, taken along by a commit
     # What this working copy and the target last agreed on (see sync.py).
@@ -1478,9 +1488,27 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         fail(opts, "read", f"Reading {target.label} '{target.name}' failed: {exc}")
         raise
     warnings = list(result.warnings) + warnings
+    # A type the catalog read came back incomplete for is out of the comparison on
+    # both sides (#50): the folder's files of that type would read as deleted from
+    # the database, and script/commit would write that deletion into the repo.
+    unread: dict[ObjectKey, str] = {}
+    for obj_type, why in result.unread.items():
+        if obj_type == "table" and not target.caps["tables"]:
+            continue  # not scripted on this platform anyway
+        keys = sorted((k for k in folder if k.type == obj_type), key=lambda k: k.sort_key)
+        for key in keys:
+            unread[key] = why
+            folder.pop(key)
+        label = TYPE_LABELS.get(obj_type, obj_type).lower()
+        warnings.append(
+            f"No {label} was compared: {why}. {len(keys)} {label} file(s) were left out of this run and "
+            "nothing was written for them. Fix the connection or the permission and run again."
+        )
     warnings += [
         f"{path} is in an object folder but its name is not schema.object.sql; it was ignored." for path in unknown
     ]
+    if unrecordable := migrations_mod.too_long(scripts):
+        warnings.append(migrations_mod.too_long_text(unrecordable))
     # A deploy reads the repo at a commit, not this working copy: no sync record applies.
     sync = SyncRecord.load(cfg.root, target.name) if files is None else SyncRecord(None)
     if files is None:
@@ -1497,6 +1525,7 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         history_error=history_error,
         dependencies=dependencies,
         conflicted=conflicted,
+        unread=unread,
     )
 
 
