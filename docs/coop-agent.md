@@ -33,6 +33,11 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
   a branch that cannot fast-forward; the answer's `git` block says what was pulled.
   coop-agent's own fetch-and-fast-forward before `sql_source commit` stays: the two
   agree, and sqlsc's check also covers the SSMS window and the shell.
+- `commit --prepared-by "coop-agent <version>"` (or the `<agent>:<person>` form of
+  `--as` alone) puts a `Prepared-by:` trailer on the commit, so git history says which
+  commits the agent prepared while the person stays the author; the answer lists it
+  under `prepared_by`. A person's later `checkin` of the agent's checkout adds the
+  same trailer on its own.
 - `checkout`, `checkin`, `unlock` and `guard` write only to the `sqlsc` schema
   (the lock table and the guard trigger); `checkin` also makes a git commit.
   A checkout that clashes returns `"ok": false` with the owner in `conflicts`
@@ -60,7 +65,9 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
    checkout held by `coop-agent:<user>` counts as that user's own (`mine` is true
    for them), so the person can also check it in themselves (from the SSMS add-in
    or `sqlsc checkin`). Naming the agent in `--as` keeps it from taking the
-   person's own checkouts, and keeps its checkouts apart from everyone else's.
+   person's own checkouts, and keeps its checkouts apart from everyone else's. Pass
+   `--prepared-by "coop-agent <coop version>"` on `commit` so the history names the
+   agent and its version.
 
 ## Example
 

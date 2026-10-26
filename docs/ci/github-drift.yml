@@ -1,0 +1,37 @@
+# Nightly drift report: lists objects that differ between a database and the repo, read
+# only, and fails the run when anything does. It never scripts, commits or applies: a
+# person decides what the difference means (commit it, get-latest, or a permissions fix).
+# Copy to .github/workflows/sql-drift.yml in the SQL repository, set TARGET, and give the
+# repository a service principal with read access to the database as secrets.
+name: SQL drift
+
+on:
+  schedule:
+    - cron: "15 3 * * *"   # 03:15 UTC, nightly
+  workflow_dispatch:
+
+env:
+  TARGET: prod            # a target in sqlsc.yml (or coop's .coop/project.yml)
+
+jobs:
+  drift:
+    runs-on: ubuntu-24.04
+    env:
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ODBC Driver 18
+        run: |
+          curl -sSL -o /tmp/microsoft.asc https://packages.microsoft.com/keys/microsoft.asc
+          sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg /tmp/microsoft.asc
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update && sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+      - name: Install sqlsc (pin the release your team runs)
+        run: pip install "coop-sql-source-control @ https://github.com/kabukisensei/coop-sql-source-control/releases/download/v1.0.7/coop_sql_source_control-1.0.7-py3-none-any.whl"
+      - name: Compare the database with the repo
+        run: sqlsc status --target "$TARGET" --exit-code

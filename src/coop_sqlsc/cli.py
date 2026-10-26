@@ -30,6 +30,7 @@ from . import config as config_mod
 from . import data as data_mod
 from . import dependencies as deps_mod
 from . import migrations as migrations_mod
+from . import sqlproj as sqlproj_mod
 from .catalog import in_scope, platform_schemas, read_database, schema_of
 from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
 from .config import KINDS, ConfigError
@@ -113,6 +114,7 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
       sqlsc get-latest     update the database to match the repo
       sqlsc checkout X     tell the team you are editing X
       sqlsc checkin        commit what you checked out and release it
+      sqlsc sqlproj        a SQL project so `dotnet build` compiles the repo
     """
     _printable_output()
     ctx.obj = Opts(as_json=as_json, config_path=config_path)
@@ -137,6 +139,7 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
 )
 @click.option("--exclude-schema", "exclude_schemas", multiple=True, help="Leave this schema out (repeat for more).")
 @click.option("--force", is_flag=True, help="Overwrite an existing sqlsc.yml.")
+@click.option("--sqlproj", "with_sqlproj", is_flag=True, help="Also write a SQL project for a compile check.")
 @click.pass_obj
 def init(
     opts: Opts,
@@ -151,6 +154,7 @@ def init(
     schemas: tuple[str, ...],
     exclude_schemas: tuple[str, ...],
     force: bool,
+    with_sqlproj: bool,
 ) -> None:
     """Link this repo to a database by writing sqlsc.yml."""
     path = (opts.config_path or Path.cwd() / config_mod.CONFIG_NAME).resolve()
@@ -180,10 +184,75 @@ def init(
     if not attributes.exists():
         attributes.write_text("*.sql text diff\n", encoding="utf-8")
     _ignore_sync_dir(path.parent)
-    emit(opts, {"command": "init", "config": str(path), "folder": folder, "target": target_name, **filters})
+    project = None
+    if with_sqlproj:
+        project, _ = _write_sqlproj(opts, config_mod.load(config_path=path), target_name, force=force)
+    emit(
+        opts,
+        {
+            "command": "init",
+            "config": str(path),
+            "folder": folder,
+            "target": target_name,
+            **filters,
+            **({"sqlproj": project} if project else {}),
+        },
+    )
     if not opts.as_json:
         console.print(f"[green]✓[/] Wrote {escape(str(path))}")
+        if project:
+            console.print(f"[green]✓[/] Wrote {escape(project)} (build it with `dotnet build`)")
         console.print(f"  Object scripts will live in [bold]{escape(folder)}/[/]. Next: [bold]sqlsc status[/]")
+
+
+@main.command()
+@click.option("--target", "-t", "target_name", help="Target whose kind picks the platform (default from sqlsc.yml).")
+@click.option("--name", help="Project name (default: the target's database name).")
+@click.option("--force", is_flag=True, help="Overwrite an existing project file.")
+@click.pass_obj
+def sqlproj(opts: Opts, target_name: str | None, name: str | None, force: bool) -> None:
+    """Write a SQL project over the scripts folder, so `dotnet build` compiles the repo.
+
+    The project (Microsoft.Build.Sql) takes every object script, leaves out Data/ and
+    Migrations/, and targets the platform of the target's kind. A build fails on bad
+    syntax or a missing reference and writes a dacpac nobody publishes: the build is the
+    check before a deploy, and get-latest and deploy stay the way changes reach a database.
+    """
+    cfg = _load_config(opts)
+    project, payload = _write_sqlproj(opts, cfg, target_name, name=name, force=force)
+    emit(opts, {"command": "sqlproj", **payload})
+    if not opts.as_json:
+        if not payload["written"]:
+            console.print(f"[dim]{escape(project)} already exists; --force replaces it.[/]")
+        console.print(f"[green]✓[/] {escape(project)}")
+        console.print("  Build: [bold]dotnet build[/] in that folder (needs the .NET SDK; see the README).")
+
+
+def _write_sqlproj(
+    opts: Opts, cfg: config_mod.Config, target_name: str | None, *, name: str | None = None, force: bool = False
+) -> tuple[str, dict[str, Any]]:
+    """Writes the project file and the .gitignore lines; returns (path relative to the repo, details)."""
+    target = _target(opts, cfg, target_name)
+    chosen = name or sqlproj_mod.project_name(target.database, cfg.folder)
+    try:
+        path, written = sqlproj_mod.write(cfg.scripts_dir, chosen, target.kind, force=force)
+    except (ValueError, OSError) as exc:
+        fail(opts, "config", str(exc))
+        raise
+    try:
+        root = git_ops.repo_root(cfg.root)
+    except git_ops.GitError:
+        root = cfg.root
+    ignored = sqlproj_mod.ignore_build_output(root)
+    rel = path.relative_to(cfg.root).as_posix()
+    details = {
+        "path": rel,
+        "written": written,
+        "platform": sqlproj_mod.PLATFORMS[target.kind],
+        "ignored": ignored,
+        "build": "dotnet build",
+    }
+    return rel, details
 
 
 @main.command()
@@ -226,6 +295,16 @@ AS_OPTION = click.option(
     "as_user",
     envvar="SQLSC_USER",
     help="Who you are for checkouts (default: git user.email; env SQLSC_USER).",
+)
+PREPARED_BY_OPTION = click.option(
+    "--prepared-by",
+    "prepared_by",
+    envvar="SQLSC_PREPARED_BY",
+    help=(
+        "Add a `Prepared-by:` trailer to the commit naming the agent that prepared the change "
+        "(for example `coop-agent 0.38.6`). Default: the agent in an `<agent>:<person>` --as name, "
+        "or, for checkin, the agents whose checkouts are checked in; env SQLSC_PREPARED_BY."
+    ),
 )
 
 
@@ -380,6 +459,7 @@ def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_ru
 @click.option("--force", is_flag=True, help="Also commit objects someone else has checked out.")
 @NO_PULL_OPTION
 @AS_OPTION
+@PREPARED_BY_OPTION
 @click.pass_obj
 def commit(
     opts: Opts,
@@ -390,6 +470,7 @@ def commit(
     force: bool,
     no_pull: bool,
     as_user: str | None,
+    prepared_by: str | None,
 ) -> None:
     """Script the database's changes into the repo and commit just those files.
 
@@ -427,12 +508,14 @@ def commit(
         held_back = [c for c in changes if c not in skipped and (not c.from_database or c in pulled)]
         changes = [c for c in changes if c not in skipped and c not in held_back]
     scripts = _uncommitted_migrations(state)
-    sha, branch = _commit_changes(opts, state, changes, message, push, scripts)
+    agents = _prepared_by(prepared_by, [git_ops.agent_of(as_user)])
+    sha, branch = _commit_changes(opts, state, changes, message, push, scripts, agents)
     emit(
         opts,
         {
             "command": "commit",
             "migrations": scripts,
+            "prepared_by": agents if sha else [],
             "setup_files": state.setup_files,
             **state.header(),
             "git": git_info,
@@ -538,10 +621,13 @@ def _commit_changes(
     message: str | None,
     push: bool,
     scripts: list[str] | None = None,
+    prepared_by: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
     """Writes the changed object files and commits exactly those, plus the migration
     scripts named in `scripts` (paths relative to the scripts folder) and a refreshed
-    Dependencies.json when the repo tracks it. Returns (short sha, pushed branch)."""
+    Dependencies.json when the repo tracks it. `prepared_by` names the agents that
+    prepared the change: each becomes a `Prepared-by:` trailer on the commit, the person
+    staying its author. Returns (short sha, pushed branch)."""
     setup = _uncommitted_setup(state)
     if not changes and not scripts and not setup and not _dependencies_pending(state):
         return None, None
@@ -566,7 +652,12 @@ def _commit_changes(
         paths.append(deps_mod.path(state.scripts_dir))
     state.sync.save()
     try:
-        sha = git_ops.commit_paths(root, paths, message or _default_message(state, changes, scripts or []))
+        sha = git_ops.commit_paths(
+            root,
+            paths,
+            message or _default_message(state, changes, scripts or []),
+            git_ops.prepared_by_trailers(prepared_by or []),
+        )
     except git_ops.GitError as exc:
         fail(opts, "git", str(exc))
         raise
@@ -871,6 +962,18 @@ def _print_kept(kept: list[Change]) -> None:
         console.print(f"[yellow]![/] Kept {escape(change.key.display)}: {escape(_keep_reason(change))}")
 
 
+def _prepared_by(explicit: str | None, inferred: list[str | None]) -> list[str]:
+    """Who prepared the change, for the commit's `Prepared-by:` trailers: the --prepared-by
+    text when given, else the agents inferred from the checkout names, none for a person."""
+    if explicit and explicit.strip():
+        return [explicit.strip()]
+    names: list[str] = []
+    for name in inferred:
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _default_message(state: State, changes: list[Change], scripts: list[str] | None = None) -> str:
     names = ", ".join(c.key.display for c in changes[:5])
     more = f" and {len(changes) - 5} more" if len(changes) > 5 else ""
@@ -942,6 +1045,7 @@ def checkout(
 @click.option("--no-commit", is_flag=True, help="Only release the checkouts (undo checkout); commit nothing.")
 @NO_PULL_OPTION
 @AS_OPTION
+@PREPARED_BY_OPTION
 @click.pass_obj
 def checkin(
     opts: Opts,
@@ -952,6 +1056,7 @@ def checkin(
     no_commit: bool,
     no_pull: bool,
     as_user: str | None,
+    prepared_by: str | None,
 ) -> None:
     """Commit the objects you checked out and release them (all of yours when none are named).
 
@@ -972,6 +1077,10 @@ def checkin(
         state = None
         pulled: list[Change] = []
         conflicted: list[ObjectKey] = []
+        # A checkout an agent took for this person (`coop-agent:ada@…`) is work the agent
+        # prepared and the person is now checking in: the commit says so in a trailer.
+        for_me = [k.locked_by for k in chosen if locks.on_behalf(k.locked_by, session.who)]
+        agents = _prepared_by(prepared_by, [git_ops.agent_of(as_user), *map(git_ops.agent_of, for_me)])
         if keys and not no_commit:
             state = _read_state(opts, target.name)
             wanted = set(keys)
@@ -984,7 +1093,7 @@ def checkin(
             # A file with unresolved merge conflict markers is out of the comparison, so
             # it has no Change; "no difference" is not "committed" (#43).
             conflicted = sorted((k for k in state.conflicted if k in wanted), key=lambda k: k.sort_key)
-            sha, branch = _commit_changes(opts, state, changes, message, push)
+            sha, branch = _commit_changes(opts, state, changes, message, push, prepared_by=agents)
         # What was held back is not in git yet: it stays checked out, so nobody else
         # edits it while the conflict is sorted out. --no-commit releases on purpose.
         keeping = {c.key for c in held_back} | set(conflicted)
@@ -997,6 +1106,7 @@ def checkin(
         **session.header(),
         "git": git_info,
         "commit": sha,
+        "prepared_by": agents if sha else [],
         "pushed": branch,
         "push_error": state.push_error if state is not None else None,
         "files": [c.to_json() for c in changes],

@@ -1,0 +1,25 @@
+# Compile check for Azure Pipelines: the same `dotnet build` of the SQL project sqlsc
+# wrote (`sqlsc sqlproj`). Copy to the SQL repository as azure-pipelines.yml (or add the
+# steps to an existing pipeline) and set folder.
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: ["*"]
+
+variables:
+  folder: database   # the `folder:` in sqlsc.yml
+
+pool:
+  vmImage: ubuntu-24.04
+
+steps:
+  - task: UseDotNet@2
+    inputs:
+      version: "8.0.x"
+  - script: dotnet build "$(folder)" --nologo
+    displayName: Build the dacpac (compile only)
+  - publish: $(folder)/bin
+    artifact: dacpac
+    condition: succeededOrFailed()
