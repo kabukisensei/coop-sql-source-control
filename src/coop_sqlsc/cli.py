@@ -1606,6 +1606,7 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
             try:
                 result = read_database(conn, target)
                 result.objects = _in_scope(target, result.objects)
+                layout_mod.remember_homes(result.objects)  # `schema` layout: a trigger's file is its table's
                 for key in conflicted:
                     result.objects.pop(key, None)
                 result.warnings += _read_static_data(

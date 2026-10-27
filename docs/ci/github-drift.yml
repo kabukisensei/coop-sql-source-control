@@ -32,6 +32,6 @@ jobs:
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update && sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
       - name: Install sqlsc (pin the release your team runs)
-        run: pip install "coop-sql-source-control @ https://github.com/kabukisensei/coop-sql-source-control/releases/download/v1.0.9/coop_sql_source_control-1.0.9-py3-none-any.whl"
+        run: pip install "coop-sql-source-control @ https://github.com/kabukisensei/coop-sql-source-control/releases/download/v1.0.10/coop_sql_source_control-1.0.10-py3-none-any.whl"
       - name: Compare the database with the repo
         run: sqlsc status --target "$TARGET" --exit-code

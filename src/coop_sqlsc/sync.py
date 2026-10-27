@@ -22,7 +22,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .layout import key_for_path, relative_path
+from .layout import key_for_path
 from .objects import ObjectKey
 
 SYNC_DIR = Path(".sqlsc") / "sync"
@@ -33,6 +33,25 @@ DATABASE, REPO, BOTH, UNKNOWN = "database", "repo", "both", "unknown"
 
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _record_key(key: ObjectKey) -> str:
+    """How an object is named in the record: `type:schema.name` (`type:name` for a
+    schema), since 1.0.10. Two objects can share one file (a table and its triggers in
+    the `schema` layout), so a file path would not do."""
+    return f"{key.type}:{key.name}" if key.type == "schema" else f"{key.type}:{key.schema}.{key.name}"
+
+
+def _key_from_record(text: str) -> ObjectKey | None:
+    """A record key back to the object: the `type:` form, or a file path written by
+    1.0.9 and before (read in the active layout; a record is one clone's, one layout's)."""
+    kind, colon, rest = text.partition(":")
+    if colon and kind in ("schema", "table", "view", "function", "procedure", "trigger", "data"):
+        if kind == "schema":
+            return ObjectKey(kind, "", rest)
+        schema, dot, name = rest.partition(".")
+        return ObjectKey(kind, schema, name) if dot and name else None
+    return key_for_path(text)
 
 
 class SyncRecord:
@@ -53,7 +72,7 @@ class SyncRecord:
             except (OSError, ValueError):
                 raw = {}
             for rel, value in (raw.get("objects") or {}).items():
-                key = key_for_path(rel)
+                key = _key_from_record(rel)
                 if key is not None and isinstance(value, str):
                     hashes[key] = value
         return cls(path, hashes)
@@ -64,7 +83,7 @@ class SyncRecord:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "note": "Written by sqlsc: the last text each object was seen with on both sides. Safe to delete.",
-            "objects": {relative_path(k): v for k, v in sorted(self.hashes.items(), key=lambda kv: kv[0].sort_key)},
+            "objects": {_record_key(k): v for k, v in sorted(self.hashes.items(), key=lambda kv: kv[0].sort_key)},
         }
         self.path.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
         self.dirty = False

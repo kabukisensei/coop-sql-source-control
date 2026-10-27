@@ -32,6 +32,8 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
   header carries `layout`. Files in the other layout make `status` warn and every
   writing command refuse with `"error": {"kind": "layout"}` before touching anything,
   so an agent should pass the warning on rather than script around it.
+  In the `schema` layout a DML trigger's `path` is its table's file (DacFx keeps
+  triggers there); two changes can name one file.
 - `data add` and `data remove` only write or delete files under `Data/`.
 - `commit` and `checkin` fast-forward the branch onto its upstream before they read
   anything (`--no-pull` skips it) and refuse, with `"error": {"kind": "git"}`, on a
