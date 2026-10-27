@@ -1029,7 +1029,7 @@ def test_init_writes_the_schema_filter_and_says_so(tmp_path):
     plain = json.loads(
         run(tmp_path, "--json", "init", "--force", "--kind", "azure_sql", "--server", "s", "--database", "Sales").output
     )
-    assert set(plain) == {"ok", "command", "config", "folder", "target"}
+    assert set(plain) == {"ok", "command", "config", "folder", "layout", "target"}
 
 
 # --- file names longer than the file system allows (#45) ----------------------------------

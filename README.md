@@ -61,7 +61,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 
 | Command | What it does |
 | --- | --- |
-| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*); `--sqlproj` also writes the SQL project (see *Compile check*) |
+| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*); `--layout type\|schema` picks the file layout (see *Repo layout*; default: what the folder already holds); `--sqlproj` also writes the SQL project (see *Compile check*) |
 | `sqlsc sqlproj` | Writes a SQL project over the scripts folder so `dotnet build` compiles the repo (see *Compile check*); `--name`, `--force` |
 | `sqlsc targets` | Lists the databases the repo can talk to |
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, plus object files written but not committed yet (from `script`, `data add` or an applied edit), which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
@@ -104,6 +104,8 @@ environment variable) overrides it, for an agent or a shared machine.
 
 ```yaml
 folder: database          # object scripts, relative to this file
+layout: type              # optional: type (Tables/dbo.Customer.sql, the default) or
+                          # schema (dbo/Tables/Customer.sql, what SSMS writes); see Repo layout
 target: dev               # used when a command names none
 targets:
   dev:
@@ -240,7 +242,17 @@ off each other's work:
   other on git's `index.lock`.
 - **Line endings never count**: `init` writes `*.sql text` so git stores LF and
   checks out the machine's style, comparisons ignore CR/LF, and an object file
-  whose only change is its line-ending style is not reported as uncommitted.
+  whose only change is its line-ending style is not reported as uncommitted. A
+  byte-order mark (SSMS saves `.sql` files with one) is ignored on reading and kept
+  when sqlsc rewrites a file that has it.
+- **SSMS's own Git windows** (Git Changes, Manage Branches, Sync) work on the same
+  files: a commit made there is an ordinary commit of the object files, and the sync
+  record still tells which side moved. What it skips is sqlsc's checks (pull first,
+  held-back objects, checkouts), so use **Commit** in the add-in window or `sqlsc
+  commit` for object files and SSMS's windows for pull, push, history and branches.
+  **Publish** from an SSMS project deploys straight to whatever database is picked,
+  with no protected-target check and no `sqlsc.Deployment` row: keep it for a
+  personal dev database and release with `deploy`.
 - git is run without prompts (`GIT_TERMINAL_PROMPT=0`, no interactive
   credentials): a remote that needs a sign-in fails at once with the reason,
   instead of hanging the SSMS window.
@@ -393,10 +405,12 @@ dotnet build database
 compiles the repo into a dacpac and fails on bad syntax or a reference to an object
 that is not there, before anything touches a database. Nobody publishes the dacpac:
 `get-latest` and `deploy` stay the way changes reach a database, and the build is
-the check in front of them. It needs the .NET SDK (`winget install Microsoft.DotNet.SDK.8`)
-and restores the SDK package from NuGet on the first build. `bin/` and `obj/` are
-added to `.gitignore`; the project file is committed and is yours to edit (sqlsc
-never rewrites it unless `--force`). Ready-made pipelines: [docs/ci/github-build.yml](docs/ci/github-build.yml)
+the check in front of them. It needs the .NET SDK (`winget install Microsoft.DotNet.SDK.8`;
+SSMS's own build uses .NET 10) and restores the SDK package from NuGet on the first build.
+`bin/` and `obj/` are added to `.gitignore`; the project file is committed and is yours
+to edit (sqlsc never rewrites it unless `--force`). The project pins Microsoft.Build.Sql
+2.3.0, so SSMS 22's Database DevOps workload (which needs 2.1.0 or newer) and Visual
+Studio open it as a database project, and a project SSMS created is left as it is. Ready-made pipelines: [docs/ci/github-build.yml](docs/ci/github-build.yml)
 and [docs/ci/azure-pipelines-build.yml](docs/ci/azure-pipelines-build.yml) build it on
 every pull request. A Fabric Warehouse script the build rejects but the Warehouse
 accepts is a DacFx gap: suppress that warning in the project rather than change the
@@ -476,6 +490,9 @@ The script runs first, the database is read again, and the compare then sees
 
 ## Repo layout
 
+Two layouts, one per repo. `type` is the default, the shape Redgate SQL Source
+Control uses:
+
 ```
 database/
   Migrations/20261020103000_backfill-region.sql
@@ -488,6 +505,41 @@ database/
   Data/sales.Status.sql
   Dependencies.json        (optional, see Lineage)
 ```
+
+`schema` is the shape SSMS's **Create Project from Database** (the Database DevOps
+workload, SSMS 22.6 and later), SqlPackage's `ExtractTarget=SchemaObjectType` and
+Visual Studio database projects write, so a repo one of them started works as it is:
+
+```
+database/
+  Migrations/20261020103000_backfill-region.sql
+  Security/sales.sql
+  sales/Tables/Customer.sql
+  sales/Views/vCustomerTotals.sql
+  dbo/Functions/fn_Double.sql
+  sales/Stored Procedures/usp_GetCustomer.sql
+  sales/Triggers/trCustomer_Touch.sql
+  Data/sales.Status.sql
+  Sales.sqlproj            (SSMS's, or from sqlsc sqlproj)
+```
+
+`layout: schema` in `sqlsc.yml` (or `sqlsc init --layout schema`) chooses it. With
+no key, the files decide: a folder that already holds `dbo/Tables/Customer.sql`
+reads as `schema`, one with `Tables/dbo.Customer.sql` as `type`, an empty one as
+`type`. `status` reports the layout in use. Files in the other layout are never
+read: `status` warns about them, and `script`, `commit`, `checkin`, `get-latest`
+and `deploy` stop with `"error": {"kind": "layout"}` before writing anything,
+because an object only such a file holds would otherwise count as missing from the
+repo (scripted a second time, or dropped by a release). Keep one layout per repo.
+`Data/` and `Migrations/` are sqlsc's own and look the same in both. A procedures
+folder spelled `StoredProcedures` (older DacFx output) is read as well.
+
+Whichever the layout, the scripts are sqlsc's: SSMS's **Schema Compare** with the
+project as target, or **Import objects**, rewrites a table file in DacFx's own shape
+(constraints inline), which `get-latest` then holds back as a hand edit rather than
+working out the `ALTER` statements. Write the repo with `script` and `commit` (the
+window, the CLI or coop) and use Schema Compare to look; views, procedures,
+functions and triggers are applied as written whoever wrote them.
 
 Scripts are deterministic: the same object always produces the same bytes, names
 are bracketed only where needed, column lists use Cooptimize's leading-comma
@@ -576,6 +628,7 @@ column type, and releases by tag to a protected target.
 4. **Deploy and static data**: `deploy` and `history` for test and prod releases, lookup-table rows as `MERGE` scripts.
 5. **SSMS add-in**: a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
 6. **Migration scripts**: hand-written, run-once scripts around the structural changes.
-7. **Compile check and the agent's mark** (this release): a SQL project for `dotnet build`, `Prepared-by:` trailers, the drift pipeline.
+7. **Compile check and the agent's mark** (1.0.8): a SQL project for `dotnet build`, `Prepared-by:` trailers, the drift pipeline.
+8. **Living with SSMS's Database DevOps** (this release): the `schema` layout SSMS and SqlPackage write, a project SSMS opens, BOMs kept.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).

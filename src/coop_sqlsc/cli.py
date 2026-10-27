@@ -29,6 +29,7 @@ from . import __version__, git_ops, locks
 from . import config as config_mod
 from . import data as data_mod
 from . import dependencies as deps_mod
+from . import layout as layout_mod
 from . import migrations as migrations_mod
 from . import sqlproj as sqlproj_mod
 from .catalog import in_scope, platform_schemas, read_database, schema_of
@@ -41,8 +42,11 @@ from .layout import (
     file_name_problem,
     key_for_path,
     objects_from_files,
+    other_layout,
     read_folder,
     relative_path,
+    sql_files,
+    use_layout,
     write_object,
 )
 from .locks import Lock, LockError, LockStore
@@ -138,12 +142,19 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
     "--schema", "schemas", multiple=True, help="Keep only this schema (repeat for more). Default: the whole database."
 )
 @click.option("--exclude-schema", "exclude_schemas", multiple=True, help="Leave this schema out (repeat for more).")
+@click.option(
+    "--layout",
+    type=click.Choice(list(layout_mod.LAYOUTS)),
+    help="How files are laid out: type (Tables/dbo.Customer.sql, the default) or schema "
+    "(dbo/Tables/Customer.sql, what SSMS and SqlPackage write). Default: what the folder already holds.",
+)
 @click.option("--force", is_flag=True, help="Overwrite an existing sqlsc.yml.")
 @click.option("--sqlproj", "with_sqlproj", is_flag=True, help="Also write a SQL project for a compile check.")
 @click.pass_obj
 def init(
     opts: Opts,
     folder: str,
+    layout: str | None,
     target_name: str,
     kind: str | None,
     server: str | None,
@@ -179,7 +190,19 @@ def init(
                 "(or run this inside a repo that has coop's .coop/project.yml).",
             )
     filters = {k: list(v) for k, v in (("schemas", schemas), ("exclude_schemas", exclude_schemas)) if v}
-    config_mod.write_new(path, folder=folder, target=target_name, target_entry=entry, filters=filters)
+    # The layout is written only when asked for: a `type` repo needs no key, and a folder
+    # SSMS already filled is recognised by its files (Config.resolved_layout).
+    found = layout_mod.detect_layout(layout_mod.sql_files(path.parent / folder))
+    if layout and found and found != layout:
+        fail(
+            opts,
+            "layout",
+            f"{folder} already holds files in the `{found}` layout; `--layout {layout}` would not read them.",
+        )
+    config_mod.write_new(
+        path, folder=folder, target=target_name, target_entry=entry, filters=filters, layout=layout or ""
+    )
+    use_layout(layout or found or layout_mod.TYPE_LAYOUT)
     attributes = path.parent / ".gitattributes"
     if not attributes.exists():
         attributes.write_text("*.sql text diff\n", encoding="utf-8")
@@ -193,6 +216,7 @@ def init(
             "command": "init",
             "config": str(path),
             "folder": folder,
+            "layout": layout_mod.active_layout(),
             "target": target_name,
             **filters,
             **({"sqlproj": project} if project else {}),
@@ -412,6 +436,8 @@ def diff(opts: Opts, objects: tuple[str, ...], target_name: str | None, context:
 def script(opts: Opts, objects: tuple[str, ...], target_name: str | None, dry_run: bool) -> None:
     """Write the database's objects into the repo folder (new, changed and deleted files)."""
     state = _read_state(opts, target_name)
+    if not dry_run:
+        _refuse_other_layout(opts, state)
     changes = _filter(state.changes(), objects)
     if not dry_run:
         _refuse_long_names(opts, changes)
@@ -488,6 +514,7 @@ def commit(
     """
     git_info = _ready_to_commit(opts, _load_config(opts), pull=not no_pull)
     state = _read_state(opts, target_name)
+    _refuse_other_layout(opts, state)
     differences = state.changes()
     changes = _filter(differences + _uncommitted(state, {c.key for c in differences}), objects)
     held, who, unreadable = _peek_locks(state, as_user)
@@ -753,6 +780,7 @@ def run_update(
     names given): the "before" ones first, after which the database is read again so
     the structural changes build on what they did; the "after" ones at the end."""
     only_script = dry_run or output is not None
+    _refuse_other_layout(opts, state)
     if state.history_error and state.migrations and not objects:
         # Running them all again could repeat a backfill: stop before anything runs or is written.
         fail(
@@ -1083,6 +1111,7 @@ def checkin(
         agents = _prepared_by(prepared_by, [git_ops.agent_of(as_user), *map(git_ops.agent_of, for_me)])
         if keys and not no_commit:
             state = _read_state(opts, target.name)
+            _refuse_other_layout(opts, state)
             wanted = set(keys)
             differences = state.changes()
             pending = _uncommitted(state, {c.key for c in differences})
@@ -1495,6 +1524,10 @@ class State:
     unread: dict[ObjectKey, str] = field(default_factory=dict)
     push_error: str | None = None
     setup_files: list[str] = field(default_factory=list)  # sqlsc.yml and friends, taken along by a commit
+    # Files laid out schema first (`dbo/Tables/Customer.sql`: SSMS's Create Project from
+    # Database, SqlPackage), which sqlsc does not read. status warns; every command that
+    # writes files or a database refuses (see _refuse_other_layout).
+    other_layout: list[str] = field(default_factory=list)
     # What this working copy and the target last agreed on (see sync.py).
     sync: SyncRecord = field(default_factory=lambda: SyncRecord(None))
     # Migrations/ scripts in the repo, and the ones sqlsc.Migration says the target has run.
@@ -1517,7 +1550,7 @@ class State:
         return self.config.scripts_dir
 
     def header(self) -> dict[str, Any]:
-        return {"target": self.target.summary(), "folder": str(self.scripts_dir)}
+        return {"target": self.target.summary(), "folder": str(self.scripts_dir), "layout": layout_mod.active_layout()}
 
     def changes(self) -> list[Change]:
         """The differences, with the side that moved; also brings the sync record up to date."""
@@ -1528,8 +1561,10 @@ class State:
 
 def _load_config(opts: Opts) -> config_mod.Config:
     try:
-        return config_mod.load(config_path=opts.config_path)
-    except ConfigError as exc:
+        cfg = config_mod.load(config_path=opts.config_path)
+        use_layout(cfg.resolved_layout())
+        return cfg
+    except (ConfigError, ValueError) as exc:
         fail(opts, "config", str(exc))
         raise  # unreachable; fail exits
 
@@ -1544,7 +1579,10 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         raise
     folder, unknown = read_folder(cfg.scripts_dir) if files is None else objects_from_files(files)
     scripts = migrations_mod.read_folder(cfg.scripts_dir) if files is None else migrations_mod.from_files(files)
+    foreign = other_layout(sql_files(cfg.scripts_dir) if files is None else files)
     warnings: list[str] = []
+    if foreign:
+        warnings.append(_other_layout_text(foreign))
     applied: dict[str, Applied] = {}
     history_error: str | None = None
     dependencies: str | None = None
@@ -1636,6 +1674,7 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         dependencies=dependencies,
         conflicted=conflicted,
         unread=unread,
+        other_layout=foreign,
     )
 
 
@@ -1671,6 +1710,28 @@ def _refuse_long_names(opts: Opts, changes: list[Change]) -> None:
             f"Not written: {names} Shorten the schema or object name, or name the other "
             f"objects on the command line to leave these out. Nothing was changed in the files.",
         )
+
+
+def _other_layout_text(files: list[str]) -> str:
+    """Why a schema-first folder stops sqlsc, naming the files (the first few)."""
+    shown = ", ".join(files[:3]) + (f" and {len(files) - 3} more" if len(files) > 3 else "")
+    active = layout_mod.active_layout()
+    other = "schema" if active == "type" else "type"
+    shapes = {"type": "Tables/dbo.Customer.sql", "schema": "dbo/Tables/Customer.sql, what SSMS and SqlPackage write"}
+    return (
+        f"{shown}: in the `{other}` layout ({shapes[other]}), but this repo is in the `{active}` layout "
+        f"({shapes[active]}), so those objects count as missing from the repo. Keep one layout per repo: "
+        f"move the files, or set `layout: {other}` in sqlsc.yml if every object file should be read that way."
+    )
+
+
+def _refuse_other_layout(opts: Opts, state: State) -> None:
+    """Stops a command that would write files or change a database on a schema-first
+    folder (see State.other_layout): script would write every object a second time,
+    commit would commit that, and get-latest or deploy would see the repo's objects
+    as gone and, with --allow-drops, drop them. status and diff only warn."""
+    if state.other_layout:
+        fail(opts, "layout", "Nothing was written. " + _other_layout_text(state.other_layout))
 
 
 def _write_from_database(state: State, change: Change) -> Path:

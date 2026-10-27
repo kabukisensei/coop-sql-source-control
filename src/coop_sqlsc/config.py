@@ -3,6 +3,9 @@
 A repo linked to a database has an `sqlsc.yml` at its root:
 
     folder: database      # object scripts live here, relative to this file
+    layout: type          # optional: `type` (Tables/dbo.Customer.sql, the default) or
+                          # `schema` (dbo/Tables/Customer.sql, what SSMS and SqlPackage
+                          # write); left out, the files in the folder decide
     target: dev           # the target commands use when none is named
     targets:              # optional when .coop/project.yml has sql_targets
       dev:
@@ -148,6 +151,7 @@ class Target:
 class Config:
     path: Path
     folder: str = "database"
+    layout: str = ""  # `type`, `schema`, or "" to go by the files (see resolved_layout)
     default_target: str = ""
     targets: dict[str, dict[str, Any]] = field(default_factory=dict)
     coop_targets: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -165,6 +169,15 @@ class Config:
     @property
     def scripts_dir(self) -> Path:
         return (self.root / self.folder).resolve()
+
+    def resolved_layout(self) -> str:
+        """The layout this repo's files are in: `layout:` when set, else what the scripts
+        folder holds (an empty or unknown folder is `type`, sqlsc's own default)."""
+        from . import layout as layout_mod
+
+        if self.layout:
+            return self.layout
+        return layout_mod.detect_layout(layout_mod.sql_files(self.scripts_dir)) or layout_mod.TYPE_LAYOUT
 
     def target_names(self) -> list[str]:
         names = list(self.targets)
@@ -288,9 +301,12 @@ def load(start: Path | None = None, *, config_path: Path | None = None) -> Confi
     config = Config(
         path=path,
         folder=_text(raw.get("folder")) or "database",
+        layout=_text(raw.get("layout")).lower(),
         default_target=_text(raw.get("target")),
         targets=_mapping(raw.get("targets"), f"`targets` in {path.name}"),
     )
+    if config.layout and config.layout not in ("type", "schema"):
+        raise ConfigError(f"`layout` in {path.name} must be `type` or `schema`, not '{config.layout}'.")
     locks = _mapping(raw.get("locks"), f"`locks` in {path.name}")
     config.lock_target = _text(locks.get("target"))
     config.lock_repo = _text(locks.get("repo"))
@@ -317,12 +333,15 @@ def write_new(
     target: str,
     target_entry: dict[str, Any] | None,
     filters: dict[str, list[str]] | None = None,
+    layout: str = "",
 ) -> None:
     lines = [
         "# coop-sql-source-control: links this repo to a database.",
         f"folder: {folder}",
-        f"target: {target}",
     ]
+    if layout:
+        lines.append(f"layout: {layout}")
+    lines.append(f"target: {target}")
     for key, names in (filters or {}).items():
         lines.append(f"{key}: {_yaml_scalar(list(names))}")
     if target_entry:
