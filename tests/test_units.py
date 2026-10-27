@@ -628,7 +628,10 @@ def test_sync_record_tells_dropped_from_not_yet_applied(tmp_path):
     changes = compare({view: text}, {view: text, proc: "CREATE PROC dbo.p1 AS SELECT 1;\nGO\n"}, sync)
     assert [(c.key, c.action, c.origin) for c in changes] == [(proc, DELETED, REPO)]  # a teammate's new proc
     sync.save()
-    assert json.loads(sync.path.read_text())["objects"] == {"Views/dbo.v1.sql": sync.hashes[view]}
+    assert json.loads(sync.path.read_text())["objects"] == {"view:dbo.v1": sync.hashes[view]}
+    # A record written by 1.0.9 or before named objects by file path; it still reads.
+    sync.path.write_text(json.dumps({"objects": {"Views/dbo.v1.sql": sync.hashes[view]}}))
+    assert SyncRecord.load(tmp_path, "dev").hashes == {view: sync.hashes[view]}
 
     # Later: v1 is gone from the database. It was synced before, so it was dropped.
     sync = SyncRecord.load(tmp_path, "dev")

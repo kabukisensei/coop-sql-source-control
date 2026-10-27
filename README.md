@@ -28,7 +28,7 @@ optional on top; none of them has to be used.
 From a release (the `.whl` on the [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)):
 
 ```powershell
-pipx install .\coop_sql_source_control-1.0.9-py3-none-any.whl
+pipx install .\coop_sql_source_control-1.0.10-py3-none-any.whl
 ```
 
 or straight from the repo, which needs a GitHub sign-in:
@@ -508,20 +508,25 @@ database/
 
 `schema` is the shape SSMS's **Create Project from Database** (the Database DevOps
 workload, SSMS 22.6 and later), SqlPackage's `ExtractTarget=SchemaObjectType` and
-Visual Studio database projects write, so a repo one of them started works as it is:
+Visual Studio database projects write (checked against SSMS 22, DacFx 170), so a
+repo one of them started works as it is:
 
 ```
 database/
   Migrations/20261020103000_backfill-region.sql
   Security/sales.sql
-  sales/Tables/Customer.sql
+  sales/Tables/Customer.sql          (its DML triggers follow the table, after GO)
   sales/Views/vCustomerTotals.sql
   dbo/Functions/fn_Double.sql
-  sales/Stored Procedures/usp_GetCustomer.sql
-  sales/Triggers/trCustomer_Touch.sql
+  sales/StoredProcedures/usp_GetCustomer.sql
   Data/sales.Status.sql
   Sales.sqlproj            (SSMS's, or from sqlsc sqlproj)
 ```
+
+A DML trigger has no file of its own in this layout: like DacFx, sqlsc keeps it as the
+last batches of its table's file, and `status` shows the table's path for it. Dropping
+the trigger takes its batches out; dropping the table takes the file. `DatabaseTriggers/`
+and `UserDefinedTypes/` hold objects sqlsc does not script and are left alone.
 
 `layout: schema` in `sqlsc.yml` (or `sqlsc init --layout schema`) chooses it. With
 no key, the files decide: a folder that already holds `dbo/Tables/Customer.sql`
@@ -532,7 +537,9 @@ and `deploy` stop with `"error": {"kind": "layout"}` before writing anything,
 because an object only such a file holds would otherwise count as missing from the
 repo (scripted a second time, or dropped by a release). Keep one layout per repo.
 `Data/` and `Migrations/` are sqlsc's own and look the same in both. A procedures
-folder spelled `StoredProcedures` (older DacFx output) is read as well.
+folder spelled `Stored Procedures` (Visual Studio's import, and sqlsc 1.0.9) and a
+`Triggers/` folder (sqlsc 1.0.9) are read as well; a trigger written again moves into
+its table's file.
 
 Whichever the layout, the scripts are sqlsc's: SSMS's **Schema Compare** with the
 project as target, or **Import objects**, rewrites a table file in DacFx's own shape
@@ -629,6 +636,6 @@ column type, and releases by tag to a protected target.
 5. **SSMS add-in**: a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
 6. **Migration scripts**: hand-written, run-once scripts around the structural changes.
 7. **Compile check and the agent's mark** (1.0.8): a SQL project for `dotnet build`, `Prepared-by:` trailers, the drift pipeline.
-8. **Living with SSMS's Database DevOps** (this release): the `schema` layout SSMS and SqlPackage write, a project SSMS opens, BOMs kept.
+8. **Living with SSMS's Database DevOps** (1.0.9 and 1.0.10): the `schema` layout SSMS and SqlPackage write (triggers in the table's file, `StoredProcedures`), a project SSMS opens, BOMs kept.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).

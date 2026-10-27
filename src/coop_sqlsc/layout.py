@@ -12,17 +12,21 @@ Two layouts, one per repo (`layout:` in sqlsc.yml, or detected from the files):
     <folder>/Triggers/dbo.trCustomer_Audit.sql
 
 `schema` (the shape SSMS's Create Project from Database, SqlPackage extract with
-`ExtractTarget=SchemaObjectType` and Visual Studio's database projects write):
+`ExtractTarget=SchemaObjectType` and Visual Studio's database projects write; checked
+against SSMS 22 / DacFx 170 on 2026-10-27):
 
     <folder>/Security/sales.sql
-    <folder>/dbo/Tables/Customer.sql
+    <folder>/dbo/Tables/Customer.sql          (its DML triggers follow it, after GO)
     <folder>/dbo/Views/vCustomer.sql
-    <folder>/dbo/Stored Procedures/usp_Load.sql
+    <folder>/dbo/StoredProcedures/usp_Load.sql
     <folder>/dbo/Functions/fn_Age.sql
-    <folder>/dbo/Triggers/trCustomer_Audit.sql
 
-Static data (`Data/`) and migration scripts (`Migrations/`) are sqlsc's own and keep
-one place in both. Characters Windows does not allow in a file name, and in the
+A DML trigger has no file of its own there: it is a batch at the end of its table's
+file, the way DacFx writes it, and sqlsc reads and writes it there (a `Triggers/`
+folder, which 1.0.9 wrote, is still read; a trigger written again moves into the
+table's file). `DatabaseTriggers/` and `UserDefinedTypes/` hold objects sqlsc does not
+script and are left alone. Static data (`Data/`) and migration scripts
+(`Migrations/`) are sqlsc's own and keep one place in both. Characters Windows does not allow in a file name, and in the
 `type` layout a "." inside a schema name, are written as %XX so every name maps to
 exactly one file and back. The active layout is process-wide (one repo per run):
 cli sets it from the config with use_layout().
@@ -33,7 +37,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
-from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey, normalize
+from . import sqltext
+from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey, batches, normalize
 
 TYPE_LAYOUT, SCHEMA_LAYOUT = "type", "schema"
 LAYOUTS = (TYPE_LAYOUT, SCHEMA_LAYOUT)
@@ -44,12 +49,12 @@ _SCHEMA_TYPE_FOLDERS: dict[str, str] = {
     "table": "Tables",
     "view": "Views",
     "function": "Functions",
-    "procedure": "Stored Procedures",
-    "trigger": "Triggers",
+    "procedure": "StoredProcedures",
+    "trigger": "Triggers",  # read only: a trigger is written into its table's file (see trigger_home)
 }
 _SCHEMA_TYPE_ALIASES: dict[str, str] = {
     **{v.lower(): k for k, v in _SCHEMA_TYPE_FOLDERS.items()},
-    "storedprocedures": "procedure",
+    "stored procedures": "procedure",  # Visual Studio's import and sqlsc 1.0.9 spelt it with a space
     "procedures": "procedure",
 }
 _SCHEMAS_FOLDER = "Security"  # `schema` layout: Security/<schema>.sql (one level up from `type`'s)
@@ -60,6 +65,29 @@ _OWN_FOLDERS = frozenset(f.split("/")[0].lower() for f in OBJECT_TYPES.values())
 _NEVER_SCHEMA = _OWN_FOLDERS | {"bin", "obj", "security"}
 
 _active = TYPE_LAYOUT
+# `schema` layout: the table each DML trigger belongs to, learnt from every trigger
+# text read (file or database), so relative_path can place a trigger in its table's
+# file. {trigger key: table key}.
+_trigger_homes: dict[ObjectKey, ObjectKey] = {}
+
+
+def trigger_home(key: ObjectKey, text: str) -> ObjectKey | None:
+    """Remembers (and returns) the table a DML trigger's text names with ON; None for a
+    text that names none (then the trigger keeps a file of its own under Triggers/)."""
+    target = sqltext.trigger_target(text)
+    if target is None:
+        return None
+    schema, table = target
+    home = ObjectKey("table", schema or key.schema, table)
+    _trigger_homes[key] = home
+    return home
+
+
+def remember_homes(objects: dict[ObjectKey, str]) -> None:
+    """Learns every trigger's table from a set of object texts (the database's, say)."""
+    for key, text in objects.items():
+        if key.type == "trigger":
+            trigger_home(key, text)
 
 
 def use_layout(name: str) -> None:
@@ -69,6 +97,7 @@ def use_layout(name: str) -> None:
     if name not in LAYOUTS:
         raise ValueError(f"layout must be one of {', '.join(LAYOUTS)}, not '{name}'.")
     _active = name
+    _trigger_homes.clear()
 
 
 def active_layout() -> str:
@@ -171,6 +200,8 @@ def file_name_problem(key: ObjectKey) -> FileNameTooLong | None:
 
 def relative_path(key: ObjectKey) -> str:
     """The object's file in the active layout, relative to the scripts folder, with forward slashes."""
+    if _active == SCHEMA_LAYOUT and key.type == "trigger" and key in _trigger_homes:
+        return relative_path(_trigger_homes[key])  # a batch in its table's file
     if _active == SCHEMA_LAYOUT and key.type in _SCHEMA_TYPE_FOLDERS:
         return f"{_encode(key.schema, dot=False)}/{_SCHEMA_TYPE_FOLDERS[key.type]}/{_encode(key.name, dot=False)}.sql"
     if _active == SCHEMA_LAYOUT and key.type == "schema":
@@ -286,15 +317,83 @@ def objects_from_files(files: dict[str, str]) -> tuple[dict[ObjectKey, str], lis
         if key is None:
             unknown.append(rel)
             continue
-        objects[key] = normalize(files[rel].lstrip("\ufeff"))
+        text = normalize(files[rel].lstrip("\ufeff"))
+        if _active == SCHEMA_LAYOUT and key.type == "table":
+            table_text, triggers = split_table_file(key, text)
+            if table_text:
+                objects[key] = table_text
+            objects.update(triggers)
+        elif _active == SCHEMA_LAYOUT and key.type == "trigger":
+            trigger_home(key, text)  # a Triggers/ file from 1.0.9: read, and moved on the next write
+            objects[key] = text
+        else:
+            objects[key] = text
     return objects, unknown
+
+
+_SET_ONLY = ("SET QUOTED_IDENTIFIER", "SET ANSI_NULLS")
+
+
+def split_table_file(table: ObjectKey, text: str) -> tuple[str, dict[ObjectKey, str]]:
+    """A `schema`-layout table file into the table's own script and the DML triggers
+    DacFx (and sqlsc) append to it, each a module script of its own. The SET batches a
+    scripted module starts with travel with the trigger that follows them. The table
+    text is "" when the file holds only triggers."""
+    own: list[str] = []
+    triggers: dict[ObjectKey, str] = {}
+    pending: list[str] = []
+    for batch in batches(text):
+        found = sqltext.declaration(batch)
+        if found is not None and sqltext.trigger_target(batch) is not None:
+            key = ObjectKey("trigger", found.schema or table.schema, found.name)
+            triggers[key] = normalize("\n".join([*(f"{b}\nGO" for b in pending), batch, "GO"]))
+            _trigger_homes[key] = table
+            pending = []
+        elif batch.upper().startswith(_SET_ONLY):
+            pending.append(batch)
+        else:
+            own += pending
+            pending = []
+            own.append(batch)
+    own += pending
+    return (normalize("\n".join(f"{b}\nGO" for b in own)) if own else ""), triggers
+
+
+def join_table_file(table_text: str, triggers: dict[ObjectKey, str]) -> str:
+    """The table's script with its triggers after it, in name order: the file DacFx shape."""
+    parts = [table_text.rstrip("\n")] if table_text else []
+    parts += [triggers[k].rstrip("\n") for k in sorted(triggers, key=lambda k: k.sort_key)]
+    return normalize("\n".join(parts))
 
 
 def write_object(root: Path, key: ObjectKey, script: str) -> Path:
     problem = file_name_problem(key)
     if problem:
         raise problem
-    path = root / relative_path(key)
+    if _active == SCHEMA_LAYOUT and key.type == "trigger" and trigger_home(key, script) is not None:
+        own_file = root / f"{_encode(key.schema, dot=False)}/Triggers/{_encode(key.name, dot=False)}.sql"
+        if own_file.is_file():
+            own_file.unlink()  # written by 1.0.9; the trigger lives in its table's file now
+        return _write_into_table_file(root, _trigger_homes[key], {key: normalize(script)})
+    if _active == SCHEMA_LAYOUT and key.type == "table":
+        return _write_into_table_file(root, key, {}, table_text=normalize(script))
+    return _write_file(root / relative_path(key), script)
+
+
+def _write_into_table_file(
+    root: Path, table: ObjectKey, triggers: dict[ObjectKey, str], *, table_text: str | None = None
+) -> Path:
+    """Rewrites a `schema`-layout table file keeping what it does not change: the table's
+    own script (unless `table_text` replaces it) and the other triggers in it."""
+    path = root / relative_path(table)
+    current_text, current = ("", {})
+    if path.is_file():
+        current_text, current = split_table_file(table, normalize(path.read_text(encoding="utf-8-sig")))
+    current.update(triggers)
+    return _write_file(path, join_table_file(current_text if table_text is None else table_text, current))
+
+
+def _write_file(path: Path, script: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Always LF and UTF-8; .gitattributes decides checkout endings. A new file gets no
     # BOM, and a file that has one (SSMS and Visual Studio save .sql files with one)
@@ -312,6 +411,16 @@ def _has_bom(path: Path) -> bool:
 
 def delete_object(root: Path, key: ObjectKey) -> Path:
     path = root / relative_path(key)
+    if _active == SCHEMA_LAYOUT and key.type == "trigger" and key in _trigger_homes and path.is_file():
+        # Take the trigger's batch out of its table's file; the file goes when nothing is left.
+        table = _trigger_homes[key]
+        table_text, triggers = split_table_file(table, normalize(path.read_text(encoding="utf-8-sig")))
+        triggers.pop(key, None)
+        if table_text or triggers:
+            _write_file(path, join_table_file(table_text, triggers))
+        else:
+            path.unlink()
+        return path
     if path.exists():
         path.unlink()
     return path

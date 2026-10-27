@@ -179,6 +179,32 @@ def quote(name: str) -> str:
     return "[" + name.replace("]", "]]") + "]"
 
 
+_ON = re.compile(r"\s+ON\s+", re.IGNORECASE)
+
+
+def trigger_target(text: str) -> tuple[str | None, str] | None:
+    """(schema, table) a DML trigger's `CREATE TRIGGER name ON table` names, read past
+    comments; None when the text is not a trigger declaration or names no table (a
+    database trigger's `ON DATABASE` / `ON ALL SERVER` gives None too)."""
+    found = declaration(text)
+    if found is None:
+        return None
+    plain = _blank(text)
+    head = plain[: found.name_span[0]].upper()
+    if "TRIGGER" not in head.split():
+        return None
+    on = _ON.match(plain, found.name_span[1])
+    if not on:
+        return None
+    name = _NAME.match(plain, on.end())
+    if not name:
+        return None
+    parts = [_unquote(name.group(g)) for g in (1, 2, 3) if name.group(g) is not None]
+    if len(parts) > 2 or parts[-1].upper() in ("DATABASE", "ALL"):
+        return None
+    return (parts[0], parts[1]) if len(parts) == 2 else (None, parts[0])
+
+
 def declared_as(text: str, schema: str, name: str) -> tuple[str, str | None]:
     """The text declaring `schema`.`name` (only the parts that differ are rewritten,
     as bracketed names; the rest of the text is untouched), and the name it declared

@@ -16,6 +16,7 @@ from click.testing import CliRunner
 from coop_sqlsc import cli as cli_mod
 from coop_sqlsc import sqlproj
 from coop_sqlsc.layout import (
+    delete_object,
     key_for_path,
     other_layout,
     read_folder,
@@ -144,7 +145,7 @@ def test_sqlproj_sdk_is_one_ssms_opens():
 def test_paths_in_the_schema_layout_match_ssms_and_sqlpackage(layout_reset):
     use_layout("schema")
     assert relative_path(TABLE) == "dbo/Tables/Customer.sql"
-    assert relative_path(ObjectKey("procedure", "sales", "usp Load")) == "sales/Stored Procedures/usp Load.sql"
+    assert relative_path(ObjectKey("procedure", "sales", "usp Load")) == "sales/StoredProcedures/usp Load.sql"
     assert relative_path(SCHEMA) == "Security/sales.sql"
     assert relative_path(ObjectKey("data", "dbo", "Status")) == "Data/dbo.Status.sql"  # sqlsc's own, unchanged
     # A dot in a schema name is a folder name now, so it stays a dot.
@@ -152,7 +153,9 @@ def test_paths_in_the_schema_layout_match_ssms_and_sqlpackage(layout_reset):
     for key in (TABLE, SCHEMA, ObjectKey("procedure", "sales", "usp Load"), ObjectKey("data", "dbo", "Status")):
         assert key_for_path(relative_path(key)) == key
     # Both spellings DacFx has used for procedures read back; sqlsc's own `type` files do not.
-    assert key_for_path("dbo/StoredProcedures/p.sql") == ObjectKey("procedure", "dbo", "p")
+    assert key_for_path("dbo/Stored Procedures/p.sql") == ObjectKey("procedure", "dbo", "p")
+    assert key_for_path("dbo/DatabaseTriggers/ddl.sql") is None and key_for_path("DatabaseTriggers/ddl.sql") is None
+    assert key_for_path("dbo/UserDefinedTypes/Money.sql") is None
     assert key_for_path("Tables/dbo.Customer.sql") is None
     assert key_for_path("Security/Schemas/sales.sql") is None
     assert key_for_path("bin/Debug/x.sql") is None
@@ -242,3 +245,90 @@ def test_a_bad_layout_key_is_a_config_error(tmp_path, fake_db):  # noqa: F811
     (tmp_path / "sqlsc.yml").write_text((tmp_path / "sqlsc.yml").read_text() + "layout: redgate\n")
     out = json.loads(run(tmp_path, "status").output)
     assert out["ok"] is False and out["error"]["kind"] == "config" and "`layout`" in out["error"]["message"]
+
+
+# --- DML triggers live in their table's file, as DacFx writes them ----------------------------
+
+TRIGGER = ObjectKey("trigger", "dbo", "trCustomer")
+TRIGGER_TEXT = "CREATE TRIGGER [dbo].[trCustomer] ON [dbo].[Customer] AFTER INSERT AS\nSELECT 1;\nGO\n"
+
+
+def test_schema_layout_keeps_a_trigger_in_its_tables_file(tmp_path):
+    use_layout("schema")
+    write_object(tmp_path, TABLE, TABLE_TEXT)
+    path = write_object(tmp_path, TRIGGER, TRIGGER_TEXT)
+    assert path == tmp_path / "dbo" / "Tables" / "Customer.sql" and relative_path(TRIGGER) == "dbo/Tables/Customer.sql"
+    assert path.read_text() == TABLE_TEXT + TRIGGER_TEXT
+    assert not (tmp_path / "dbo" / "Triggers").exists()
+    objects, unknown = read_folder(tmp_path)
+    assert objects == {TABLE: TABLE_TEXT, TRIGGER: TRIGGER_TEXT} and unknown == []
+    # The table is rewritten: its triggers stay. The trigger is rewritten: the table stays.
+    wider = TABLE_TEXT.replace("[Id] int NOT NULL", "[Id] int NOT NULL\n     ,[Name] nvarchar(50) NULL")
+    write_object(tmp_path, TABLE, wider)
+    changed = TRIGGER_TEXT.replace("SELECT 1", "SELECT 2")
+    write_object(tmp_path, TRIGGER, changed)
+    assert read_folder(tmp_path)[0] == {TABLE: wider, TRIGGER: changed}
+    # Dropping the trigger takes its batch out and leaves the table; dropping the table takes the file.
+    delete_object(tmp_path, TRIGGER)
+    assert read_folder(tmp_path)[0] == {TABLE: wider}
+    delete_object(tmp_path, TABLE)
+    assert not path.exists()
+
+
+def test_a_dacfx_table_file_with_triggers_reads_as_table_plus_triggers(tmp_path):
+    use_layout("schema")
+    second = ObjectKey("trigger", "dbo", "trCustomer_Touch")
+    dacfx = (
+        "\ufeffCREATE TABLE [dbo].[Customer] (\n    [Id] INT NOT NULL\n);\r\n\r\n\r\nGO\r\n"
+        "SET QUOTED_IDENTIFIER OFF\r\nGO\r\n"
+        "CREATE TRIGGER [dbo].[trCustomer_Touch]\r\n    ON [dbo].[Customer]\r\n    FOR UPDATE\r\n    AS\r\n"
+        "    BEGIN\r\n        SET NoCount ON\r\n    END\r\n\r\nGO\r\n" + TRIGGER_TEXT
+    )
+    (tmp_path / "dbo" / "Tables").mkdir(parents=True)
+    (tmp_path / "dbo" / "Tables" / "Customer.sql").write_text(dacfx, encoding="utf-8")
+    objects, _ = read_folder(tmp_path)
+    assert set(objects) == {TABLE, TRIGGER, second}
+    assert objects[TABLE] == "CREATE TABLE [dbo].[Customer] (\n    [Id] INT NOT NULL\n);\nGO\n"
+    assert objects[second].startswith("SET QUOTED_IDENTIFIER OFF\nGO\nCREATE TRIGGER [dbo].[trCustomer_Touch]")
+    assert objects[TRIGGER] == TRIGGER_TEXT
+    assert relative_path(second) == "dbo/Tables/Customer.sql"
+
+
+def test_a_trigger_file_from_1_0_9_is_read_and_moves_into_the_table_file_on_write(tmp_path):
+    use_layout("schema")
+    write_object(tmp_path, TABLE, TABLE_TEXT)
+    old = tmp_path / "dbo" / "Triggers" / "trCustomer.sql"
+    old.parent.mkdir(parents=True)
+    old.write_text(TRIGGER_TEXT)
+    objects, _ = read_folder(tmp_path)
+    assert objects == {TABLE: TABLE_TEXT, TRIGGER: TRIGGER_TEXT}
+    write_object(tmp_path, TRIGGER, TRIGGER_TEXT.replace("SELECT 1", "SELECT 2"))
+    assert not old.exists()
+    assert (tmp_path / "dbo" / "Tables" / "Customer.sql").read_text().count("CREATE TRIGGER") == 1
+
+
+def test_status_and_commit_place_a_new_trigger_in_the_table_file(tmp_path, fake_db):  # noqa: F811
+    _init(tmp_path, "--layout", "schema")
+    fake_db[TABLE] = TABLE_TEXT
+    fake_db[TRIGGER] = TRIGGER_TEXT
+    status = json.loads(run(tmp_path, "status").output)
+    assert {(c["object"], c["path"]) for c in status["changes"]} == {
+        ("[dbo].[Customer]", "dbo/Tables/Customer.sql"),
+        ("[dbo].[trCustomer]", "dbo/Tables/Customer.sql"),
+    }
+    done = json.loads(run(tmp_path, "commit", "-m", "table and trigger", "--no-pull").output)
+    assert done["ok"] and done["summary"]["new"] == 2
+    assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split() == [
+        ".gitattributes",
+        ".gitignore",
+        "database/dbo/Tables/Customer.sql",
+        "sqlsc.yml",
+    ]
+    assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
+    # The trigger goes in the database: commit removes its batch and keeps the table's file.
+    del fake_db[TRIGGER]
+    status = json.loads(run(tmp_path, "status").output)
+    assert [(c["object"], c["action"]) for c in status["changes"]] == [("[dbo].[trCustomer]", "deleted")]
+    assert json.loads(run(tmp_path, "commit", "-m", "drop trigger", "--no-pull").output)["ok"]
+    assert (tmp_path / "database" / "dbo" / "Tables" / "Customer.sql").read_text() == TABLE_TEXT
+    assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
