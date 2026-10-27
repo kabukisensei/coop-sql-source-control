@@ -72,3 +72,13 @@ def connect(server: str, database: str):
         f"PWD={os.environ['SQLSC_PASSWORD']};Encrypt=yes;TrustServerCertificate=yes;",
         autocommit=True,
     )
+
+
+@pytest.fixture(autouse=True)
+def _default_layout():
+    """The active file layout is process-wide (one repo per sqlsc run); a test that read a
+    `schema` repo must not leave it for the next."""
+    from coop_sqlsc import layout
+
+    yield
+    layout.use_layout(layout.TYPE_LAYOUT)

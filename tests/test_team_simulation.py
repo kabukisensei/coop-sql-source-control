@@ -123,13 +123,16 @@ class LockTable:
 
 
 class Team:
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, layout: str = "type"):
         self.db: dict[ObjectKey, str] = {}
         self.locks = LockTable()
+        self.layout = layout
         self.origin = tmp_path / "origin.git"
         git(tmp_path, "init", "-q", "--bare", "-b", "main", str(self.origin))
         self.ada = self.clone(tmp_path / "ada", ADA, "Ada")
-        result = run(self.ada, "init", "--kind", "sql_server", "--server", "fixture", "--database", "fixture")
+        result = run(
+            self.ada, "init", "--kind", "sql_server", "--server", "fixture", "--database", "fixture", "--layout", layout
+        )
         assert result.exit_code == 0, result.output
         git(self.ada, "add", "-A")
         git(self.ada, "commit", "-q", "-m", "sqlsc setup")
@@ -142,6 +145,12 @@ class Team:
         git(where, "config", "user.name", name)
         return where
 
+    def view_path(self, key: ObjectKey) -> str:
+        """A view's file, relative to the scripts folder, in this team's layout."""
+        if self.layout == "schema":
+            return f"{key.schema}/Views/{key.name}.sql"
+        return f"Views/{key.schema}.{key.name}.sql"
+
     def pull(self, clone: Path) -> None:
         git(clone, "pull", "-q", "--ff-only")
 
@@ -149,7 +158,7 @@ class Team:
         return git(clone, "rev-parse", "HEAD").stdout.strip()
 
     def file(self, clone: Path, key: ObjectKey) -> str | None:
-        path = clone / "database" / "Views" / f"{key.schema}.{key.name}.sql"
+        path = clone / "database" / self.view_path(key)
         return path.read_text(encoding="utf-8") if path.exists() else None
 
     def locked_by(self, key: ObjectKey) -> str | None:
@@ -157,11 +166,13 @@ class Team:
         return found[0] if found else None
 
 
-@pytest.fixture
-def team(tmp_path, monkeypatch):
+# Every scenario runs in both file layouts: sqlsc's own (`type`) and the one SSMS's
+# Create Project from Database and SqlPackage write (`schema`, 2026-10-27).
+@pytest.fixture(params=["type", "schema"])
+def team(tmp_path, monkeypatch, request):
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    team = Team(tmp_path)
+    team = Team(tmp_path, request.param)
     monkeypatch.setattr(cli_mod, "open_connection", lambda target: Conn())
     monkeypatch.setattr(cli_mod, "read_database", lambda c, t: CatalogResult(dict(team.db), []))
     monkeypatch.setattr(cli_mod, "LockStore", team.locks)
@@ -275,7 +286,7 @@ def test_a_fresh_clone_does_not_commit_the_database_over_a_teammates_pushed_edit
     commit = out(run(team.bob, "commit", "-m", "bob"))
     # Without a sync record "unknown" would be committed; the pull just changed this
     # file, which proves the repo moved, so it is held back instead.
-    assert commit["git"]["pulled"] == 1 and commit["git"]["pulled_files"] == ["Views/dbo.v.sql"]
+    assert commit["git"]["pulled"] == 1 and commit["git"]["pulled_files"] == [team.view_path(V)]
     assert commit["commit"] is None and "pull just brought this file in" in commit["held_back"][0]["reason"]
     assert team.file(team.bob, V) == V2
     # A pull that touched an unrelated file does not hold a genuine database change back.
@@ -370,17 +381,17 @@ def test_a_half_merged_sql_file_is_left_out_until_it_is_resolved(team):
     run(team.ada, "commit", "-m", "baseline", "--push")
     team.pull(team.bob)
     marked = "CREATE VIEW dbo.v AS\n<<<<<<< HEAD\nSELECT 2 AS n;\n=======\nSELECT 3 AS n;\n>>>>>>> origin/main\nGO\n"
-    (team.bob / "database" / "Views" / "dbo.v.sql").write_text(marked)
+    (team.bob / "database" / team.view_path(V)).write_text(marked)
     team.db[W] = W2
     status = out(run(team.bob, "status"))
-    assert status["conflicted"] == ["Views/dbo.v.sql"]
+    assert status["conflicted"] == [team.view_path(V)]
     assert [c["object"] for c in status["changes"]] == ["[dbo].[w]"]
     assert any("conflict markers" in w for w in status["warnings"])
     # get-latest would otherwise run the markers as SQL; script would overwrite the merge.
     plan = out(run(team.bob, "get-latest", "--dry-run"))
     assert "<<<<<<<" not in (plan["script"] or "") and "dbo.v" not in (plan["script"] or "")
     out(run(team.bob, "script"))
-    assert (team.bob / "database" / "Views" / "dbo.v.sql").read_text() == marked
+    assert (team.bob / "database" / team.view_path(V)).read_text() == marked
     commit = out(run(team.bob, "commit", "-m", "w only"))
     assert [f["object"] for f in commit["files"]] == ["[dbo].[w]"]
 
@@ -432,7 +443,7 @@ def test_two_sqlsc_runs_at_once_wait_for_gits_index_lock(team):
 def test_line_endings_do_not_count_as_a_change(team):
     team.db[V] = V1
     run(team.ada, "commit", "-m", "baseline", "--push")
-    path = team.ada / "database" / "Views" / "dbo.v.sql"
+    path = team.ada / "database" / team.view_path(V)
     path.write_bytes(V1.replace("\n", "\r\n").encode("utf-8"))
     assert out(run(team.ada, "status"))["changes"] == []
     team.db[V] = V1.replace("\n", "\r\n")
@@ -449,7 +460,7 @@ def test_checkin_keeps_a_marker_conflicted_object_checked_out(team):
     assert run(team.ada, "commit", "-m", "baseline", "--push").exit_code == 0
     assert run(team.ada, "checkout", "dbo.v", "dbo.w").exit_code == 0
     marked = "CREATE VIEW dbo.v AS\n<<<<<<< HEAD\nSELECT 2 AS n;\n=======\nSELECT 3 AS n;\n>>>>>>> origin/main\nGO\n"
-    (team.ada / "database" / "Views" / "dbo.v.sql").write_text(marked, encoding="utf-8")
+    (team.ada / "database" / team.view_path(V)).write_text(marked, encoding="utf-8")
     team.db[W] = W2  # a clean change next to it
     result = run(team.ada, "checkin", "--no-pull", "-m", "w")
     payload = out(result)

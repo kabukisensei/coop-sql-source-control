@@ -4,14 +4,17 @@
 that takes every `.sql` file under the scripts folder except the static data `MERGE`
 files and the migration scripts. `dotnet build` on it resolves every reference and
 fails on bad syntax or a missing object, producing a dacpac nobody has to publish: the
-build is the check, `get-latest` and `deploy` stay the way changes reach a database.
+build is the check, `get-latest` and `deploy` stay the way changes reach a database. SSMS
+(Database DevOps workload) and Visual Studio open the same file as a database project.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-SDK_VERSION = "1.0.0"
+# The SDK version the project pins. SSMS's Database DevOps workload opens SDK-style projects
+# of Microsoft.Build.Sql 2.1.0 or newer only, so the pin stays at or above that.
+SDK_VERSION = "2.3.0"
 
 # DacFx's target platform per kind of database (the project's DSP). Fabric SQL database
 # is Azure SQL under the hood; a Lakehouse SQL analytics endpoint and Synapse serverless
