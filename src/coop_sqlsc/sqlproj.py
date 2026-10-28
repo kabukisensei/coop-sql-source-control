@@ -51,9 +51,11 @@ def render(name: str, kind: str) -> str:
         "    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>\n"
         "  </PropertyGroup>\n"
         "  <ItemGroup>\n"
-        "    <!-- Static data (MERGE scripts) and run-once migration scripts are not schema. -->\n"
-        '    <Build Remove="Data/**" />\n'
-        '    <Build Remove="Migrations/**" />\n'
+        "    <!-- Static data (MERGE scripts) and run-once migration scripts are not schema. Only the\n"
+        "         files directly in Data/ and Migrations/: a schema named Data or Migrations keeps its\n"
+        "         objects in Data/Tables/ and the like in the schema layout. -->\n"
+        '    <Build Remove="Data/*.sql" />\n'
+        '    <Build Remove="Migrations/*.sql" />\n'
         "  </ItemGroup>\n"
         "</Project>\n"
     )
