@@ -13,7 +13,7 @@ from coop_sqlsc.catalog import CatalogResult
 from coop_sqlsc.compare import CHANGED, DELETED, NEW, compare, matches
 from coop_sqlsc.config import ConfigError, build_target, load
 from coop_sqlsc.connect import connection_string, pack_token, pick_driver
-from coop_sqlsc.layout import key_for_path, read_folder, relative_path, write_object
+from coop_sqlsc.layout import key_for_path, read_folder, relative_path, use_layout, write_object
 from coop_sqlsc.objects import ObjectKey, normalize
 from coop_sqlsc.scripter import Column, ForeignKey, KeyConstraint, Table, quote, script_module, script_table, type_text
 
@@ -1052,3 +1052,48 @@ def test_long_object_names_are_refused_before_writing(tmp_path):
     assert file_name_problem(ObjectKey("view", "dbo", "Ärger")) is None
     assert file_name_problem(ObjectKey("schema", "", "x" * 251)) is None  # 251 + 4 = 255
     assert file_name_problem(ObjectKey("schema", "", "x" * 252)) is not None
+
+
+def test_sync_record_keys_survive_a_dot_in_a_schema_or_name(tmp_path):  # 64
+    from coop_sqlsc.sync import _record_key
+
+    dotted_schema, dotted_name = ObjectKey("view", "a.b", "c"), ObjectKey("view", "a", "b.c")
+    assert _record_key(dotted_schema) != _record_key(dotted_name)
+    assert _record_key(dotted_schema) == "view:a%2Eb.c" and _record_key(dotted_name) == "view:a.b%2Ec"
+    odd = ObjectKey("procedure", "100%", "p.q%r")
+    schema = ObjectKey("schema", "", "a.b")
+    texts = {
+        dotted_schema: "CREATE VIEW [a.b].[c] AS SELECT 1;",
+        dotted_name: "CREATE VIEW [a].[b.c] AS SELECT 2;",
+        odd: "x",
+        schema: "y",
+    }
+    sync = SyncRecord.load(tmp_path, "dev")
+    for key, text in texts.items():
+        sync.record(key, text)
+    sync.save()
+    raw = json.loads(sync.path.read_text())
+    assert raw["format"] == 2 and len(raw["objects"]) == 4
+    restored = SyncRecord.load(tmp_path, "dev")
+    assert restored.hashes == sync.hashes
+    # The repo-side edit of [a.b].[v] is held as the repo's, in both layouts.
+    for layout in ("type", "schema"):
+        use_layout(layout)
+        key = ObjectKey("view", "a.b", "v")
+        old, new = "CREATE VIEW [a.b].[v] AS SELECT 1;", "CREATE VIEW [a.b].[v] AS SELECT 2;"
+        record = SyncRecord.load(tmp_path, layout)
+        record.record(key, old)
+        record.save()
+        change = compare({key: old}, {key: new}, SyncRecord.load(tmp_path, layout))[0]
+        assert change.origin == REPO and not change.from_database
+        assert compare({key: new}, {key: old}, SyncRecord.load(tmp_path, layout))[0].origin == DATABASE
+    use_layout("type")
+    # A 1.0.10 record (no format) reads its one-dot keys; a key with two dots is
+    # ambiguous and is dropped rather than read at its first dot. File paths from
+    # 1.0.9 still read.
+    plain = ObjectKey("view", "dbo", "v1")
+    old = {"view:dbo.v1": "h1", "view:a.b.c": "h2", "schema:s": "h3", "Views/dbo.v2.sql": "h4"}
+    sync.path.write_text(json.dumps({"objects": old}))
+    legacy = SyncRecord.load(tmp_path, "dev")
+    assert legacy.hashes == {plain: "h1", ObjectKey("schema", "", "s"): "h3", ObjectKey("view", "dbo", "v2"): "h4"}
+    assert compare({dotted_schema: "x"}, {dotted_schema: "y"}, legacy)[0].origin == UNKNOWN

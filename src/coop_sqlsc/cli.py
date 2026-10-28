@@ -516,7 +516,8 @@ def commit(
     state = _read_state(opts, target_name)
     _refuse_other_layout(opts, state)
     differences = state.changes()
-    changes = _filter(differences + _uncommitted(state, {c.key for c in differences}), objects)
+    pending = _uncommitted(state, {c.key for c in differences})
+    changes = _filter(differences + pending, objects)
     held, who, unreadable = _peek_locks(state, as_user)
     skipped: list[Change] = []
     held_back: list[Change] = []
@@ -534,6 +535,8 @@ def commit(
         skipped = [c for c in changes if c.key in held and not _same_user(held[c.key].locked_by, who)]
         held_back = [c for c in changes if c not in skipped and (not c.from_database or c in pulled)]
         changes = [c for c in changes if c not in skipped and c not in held_back]
+    changes, shared = _hold_shared_files(state, changes)
+    held_back += [c for c in differences + pending if c.key in shared and c not in held_back]
     scripts = _uncommitted_migrations(state)
     agents = _prepared_by(prepared_by, [git_ops.agent_of(as_user)])
     sha, branch = _commit_changes(opts, state, changes, message, push, scripts, agents)
@@ -552,7 +555,7 @@ def commit(
             "summary": summarize(changes),
             "files": [c.to_json() for c in changes],
             "skipped": [{**c.to_json(), "locked_by": held[c.key].locked_by} for c in skipped],
-            "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled)} for c in held_back],
+            "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled, shared)} for c in held_back],
             "warnings": state.warnings,
         },
     )
@@ -579,7 +582,7 @@ def commit(
             " (--force commits it anyway)."
         )
     for change in held_back:
-        console.print(f"[yellow]![/] Left {escape(change.key.display)}: {escape(_hold_reason(change, pulled))}")
+        console.print(f"[yellow]![/] Left {escape(change.key.display)}: {escape(_hold_reason(change, pulled, shared))}")
     _print_warnings(state.warnings)
 
 
@@ -665,12 +668,17 @@ def _commit_changes(
         raise
     state.setup_files = setup
     _refuse_long_names(opts, [c for c in changes if c.key not in state.uncommitted])
+    layout_mod.take_touched_paths()  # nothing written before this run's writes counts
     paths: list[Path] = []
     for change in changes:
         if change.key in state.uncommitted:
             paths.append(state.scripts_dir / relative_path(change.key))  # already right on disk; commit as it is
+            paths += _uncommitted_paths(state, change.key)  # a 1.0.9 trigger file it still sits in
         else:
             paths.append(_write_from_database(state, change))
+    # A write can remove a path it does not return (a trigger moving out of its 1.0.9
+    # Triggers/ file into its table's): the commit stages that removal too (#65).
+    paths += [path for path in layout_mod.take_touched_paths() if path not in paths]
     paths += [state.scripts_dir / rel for rel in scripts or []]
     paths += [state.config.root / name for name in setup]
     if state.dependencies is not None:
@@ -1105,6 +1113,7 @@ def checkin(
         state = None
         pulled: list[Change] = []
         conflicted: list[ObjectKey] = []
+        shared: dict[ObjectKey, str] = {}
         # A checkout an agent took for this person (`coop-agent:ada@…`) is work the agent
         # prepared and the person is now checking in: the commit says so in a trailer.
         for_me = [k.locked_by for k in chosen if locks.on_behalf(k.locked_by, session.who)]
@@ -1119,6 +1128,8 @@ def checkin(
             pulled = _just_pulled(changes, git_info)
             held_back = [c for c in changes if not c.from_database or c in pulled]
             changes = [c for c in changes if c not in held_back]
+            changes, shared = _hold_shared_files(state, changes)
+            held_back += [c for c in differences + pending if c.key in shared and c not in held_back]
             # A file with unresolved merge conflict markers is out of the comparison, so
             # it has no Change; "no difference" is not "committed" (#43).
             conflicted = sorted((k for k in state.conflicted if k in wanted), key=lambda k: k.sort_key)
@@ -1140,7 +1151,7 @@ def checkin(
         "push_error": state.push_error if state is not None else None,
         "files": [c.to_json() for c in changes],
         "released": [_key_json(k) for k in released],
-        "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled)} for c in held_back]
+        "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled, shared)} for c in held_back]
         + [_conflicted_json(k) for k in conflicted],
         "not_checked_out": list(unknown),
         "warnings": state.warnings if state is not None else [],
@@ -1165,7 +1176,7 @@ def checkin(
         for change in held_back:
             console.print(
                 f"[yellow]![/] Kept {escape(change.key.display)} checked out, not committed: "
-                f"{escape(_hold_reason(change, pulled))}"
+                f"{escape(_hold_reason(change, pulled, shared))}"
             )
         for key in conflicted:
             console.print(
@@ -1787,8 +1798,12 @@ def _both_text(change: Change) -> str:
     return "changed in the database and in the repo since your last sync"
 
 
-def _hold_reason(change: Change, just_pulled: list[Change] | None = None) -> str:
+def _hold_reason(
+    change: Change, just_pulled: list[Change] | None = None, shared: dict[ObjectKey, str] | None = None
+) -> str:
     """Why commit leaves an object alone."""
+    if shared and change.key in shared:
+        return shared[change.key]
     if just_pulled and change in just_pulled:
         return (
             "the pull just brought this file in from a teammate's commit and this working copy has no sync "
@@ -1906,35 +1921,93 @@ def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
     """Object files that already match the database but are not committed yet: written
     by `script` or `data add`, or edited and applied with get-latest. The database shows
     no difference for them, yet commit and checkin still owe git these files.
-    Records their keys on state so _commit_changes commits them as they are."""
+    Records their keys on state so _commit_changes commits them as they are.
+
+    A file is read object by object: a `schema`-layout table file holds the table and
+    its triggers, and a changed trigger is the trigger's change, not the table's (#66)."""
     try:
         root = git_ops.repo_root(state.config.root)
         dirty = git_ops.uncommitted(root, state.scripts_dir)
     except git_ops.GitError:
         return []  # not a repo yet; _commit_changes says so if it gets that far
     found: list[Change] = []
-    for rel, how in dirty.items():
-        key = key_for_path(rel)
-        if key is None or key in differing or not _tracks(state.target, key):
-            continue  # an out-of-scope file, even a deleted one, stays as git has it
-        if how == "deleted":
-            found.append(Change(key, DELETED, None, None, DATABASE))
-        elif key in state.folder:
-            text = state.folder[key]
-            if how == "modified" and _only_line_endings_differ(root, state.scripts_dir, rel, text):
-                continue  # an editor changed the line-ending style; git normalizes it away on add
-            found.append(Change(key, NEW if how == "added" else CHANGED, text, text, DATABASE))
-        else:
-            continue
-        state.uncommitted.add(key)
+    for rel in sorted(dirty):
+        for key, how in _objects_vs_head(state, root, rel).items():
+            if key in differing or not _tracks(state.target, key):
+                continue  # an out-of-scope object, even a deleted one, stays as git has it
+            if how == "deleted":
+                found.append(Change(key, DELETED, None, None, DATABASE))
+            elif key in state.folder:
+                text = state.folder[key]
+                found.append(Change(key, NEW if how == "added" else CHANGED, text, text, DATABASE))
+            else:
+                continue
+            state.uncommitted.add(key)
     found.sort(key=lambda c: c.key.sort_key)
     return found
 
 
-def _only_line_endings_differ(root: Path, folder: Path, rel: str, text: str) -> bool:
-    prefix = folder.resolve().relative_to(root.resolve()).as_posix()
+def _objects_vs_head(state: State, root: Path, rel: str) -> dict[ObjectKey, str]:
+    """{object: 'added' | 'modified' | 'deleted'} for the objects of one dirty file
+    (relative to the scripts folder) that differ between HEAD and the working
+    folder. A line-ending change alone is no difference: git normalizes it away on
+    add. A file outside the object folders gives nothing."""
+    key = key_for_path(rel)
+    if key is None or not layout_mod.object_file(rel):
+        return {}
+    prefix = state.scripts_dir.resolve().relative_to(root.resolve()).as_posix()
     at_head = git_ops.head_text(root, rel if prefix == "." else f"{prefix}/{rel}")
-    return at_head is not None and same_line_endings(at_head).strip() == same_line_endings(text).strip()
+    path = state.scripts_dir / rel
+    try:
+        on_disk = path.read_text(encoding="utf-8-sig") if path.is_file() else None
+    except (OSError, UnicodeDecodeError):
+        on_disk = None
+    before = layout_mod.file_objects(key, at_head) if at_head is not None else {}
+    after = layout_mod.file_objects(key, on_disk) if on_disk is not None else {}
+    out: dict[ObjectKey, str] = {}
+    for obj in sorted(before.keys() | after.keys(), key=lambda k: k.sort_key):
+        if obj not in after:
+            out[obj] = "deleted"
+        elif obj not in before:
+            out[obj] = "added"
+        elif same_line_endings(before[obj]).strip() != same_line_endings(after[obj]).strip():
+            out[obj] = "modified"
+    return out
+
+
+def _uncommitted_paths(state: State, key: ObjectKey) -> list[Path]:
+    """Besides its file in the layout, the paths an uncommitted object's change may
+    sit in: a `schema`-layout trigger's own file from 1.0.9, when it still exists."""
+    legacy = layout_mod.legacy_trigger_file(state.scripts_dir, key)
+    return [legacy] if legacy is not None and legacy.is_file() else []
+
+
+def _hold_shared_files(state: State, changes: list[Change]) -> tuple[list[Change], dict[ObjectKey, str]]:
+    """Leaves out of a commit every change whose file also carries an uncommitted
+    change to another object that is not being committed: git stages whole files, so
+    committing the trigger would quietly take the table's edit (or the other way
+    round) along (#66). Returns (the changes to commit, {held key: why})."""
+    if layout_mod.active_layout() != layout_mod.SCHEMA_LAYOUT:
+        return changes, {}
+    try:
+        root = git_ops.repo_root(state.config.root)
+    except git_ops.GitError:
+        return changes, {}
+    committing = {c.key for c in changes}
+    by_file: dict[str, dict[ObjectKey, str]] = {}
+    held: dict[ObjectKey, str] = {}
+    for change in changes:
+        rel = relative_path(change.key)
+        if rel not in by_file:
+            by_file[rel] = _objects_vs_head(state, root, rel)
+        others = [k for k in by_file[rel] if k != change.key and k not in committing and _tracks(state.target, k)]
+        if others:
+            names = ", ".join(k.display for k in others)
+            held[change.key] = (
+                f"shares {rel} with an uncommitted change to {names}; commit them together "
+                f"(name both), or put that edit back as HEAD has it first"
+            )
+    return [c for c in changes if c.key not in held], held
 
 
 def _filter(changes: list[Change], objects: tuple[str, ...]) -> list[Change]:
