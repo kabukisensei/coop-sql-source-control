@@ -332,3 +332,214 @@ def test_status_and_commit_place_a_new_trigger_in_the_table_file(tmp_path, fake_
     assert json.loads(run(tmp_path, "commit", "-m", "drop trigger", "--no-pull").output)["ok"]
     assert (tmp_path / "database" / "dbo" / "Tables" / "Customer.sql").read_text() == TABLE_TEXT
     assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
+
+
+# --- the 2026-10-28 audit: #63 reserved-name schemas, #65 legacy trigger files, #66 shared files
+
+
+def test_a_schema_named_like_a_folder_keeps_its_objects(tmp_path, layout_reset):  # 63
+    from coop_sqlsc.compare import compare
+    from coop_sqlsc.deploy import build_plan
+    from coop_sqlsc.layout import detect_layout, objects_from_files
+
+    use_layout("schema")
+    objects = {
+        ObjectKey("table", "Data", "T"): "CREATE TABLE [Data].[T]\n(\n    [Id] int NOT NULL\n);\nGO\n",
+        ObjectKey("view", "Security", "v"): "CREATE VIEW [Security].[v] AS SELECT 1;\nGO\n",
+        ObjectKey("procedure", "Tables", "p"): "CREATE PROCEDURE [Tables].[p] AS SELECT 1;\nGO\n",
+        ObjectKey("function", "bin", "f"): "CREATE FUNCTION [bin].[f]() RETURNS int AS BEGIN RETURN 1 END;\nGO\n",
+        ObjectKey("table", "MIGRATIONS", "m"): "CREATE TABLE [MIGRATIONS].[m]\n(\n    [Id] int NOT NULL\n);\nGO\n",
+        ObjectKey("schema", "", "Data"): "CREATE SCHEMA [Data];\nGO\n",
+        ObjectKey("data", "Data", "Status"): "INSERT INTO [Data].[Status] ([Id]) VALUES (1);\nGO\n",
+    }
+    for key, text in objects.items():
+        write_object(tmp_path, key, text)
+    files = sql_files(tmp_path)
+    assert files == [
+        "Data/Data.Status.sql",
+        "Data/Tables/T.sql",
+        "MIGRATIONS/Tables/m.sql",
+        "Security/Data.sql",
+        "Security/Views/v.sql",
+        "Tables/StoredProcedures/p.sql",
+        "bin/Functions/f.sql",
+    ]
+    assert detect_layout(files) == "schema" and other_layout(files) == []
+    folder, unknown = read_folder(tmp_path)
+    assert folder == objects and unknown == []
+    assert objects_from_files({rel: (tmp_path / rel).read_text() for rel in files})[0] == objects
+    # The committed tree reads the same, so a release never plans a DROP for them.
+    plan = build_plan(compare(objects, folder), allow_drops=True)
+    assert plan.runnable == [] and plan.steps == []
+    # The 2-part shapes keep their meanings beside the 3-part ones.
+    assert key_for_path("Data/dbo.T.sql") == ObjectKey("data", "dbo", "T")
+    assert key_for_path("Security/sales.sql") == ObjectKey("schema", "", "sales")
+    assert key_for_path("bin/Debug/x.sql") is None and key_for_path("obj/Release/Model.sql") is None
+    # And in a `type` repo such files are still the other layout's.
+    use_layout("type")
+    assert other_layout(["Data/Tables/T.sql", "Data/dbo.T.sql", "Tables/dbo.T.sql"]) == ["Data/Tables/T.sql"]
+
+
+def test_status_and_commit_see_a_table_in_a_schema_named_data(tmp_path, fake_db):  # noqa: F811  # 63
+    _init(tmp_path, "--layout", "schema")
+    key = ObjectKey("table", "Data", "T")
+    text = "CREATE TABLE [Data].[T]\n(\n    [Id] int NOT NULL\n);\nGO\n"
+    fake_db[key] = text
+    status = json.loads(run(tmp_path, "status").output)
+    assert [(c["object"], c["path"], c["action"]) for c in status["changes"]] == [
+        ("[Data].[T]", "Data/Tables/T.sql", "new")
+    ]
+    assert json.loads(run(tmp_path, "commit", "-m", "data schema", "--no-pull").output)["ok"]
+    assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
+    assert (tmp_path / "database" / "Data" / "Tables" / "T.sql").read_text() == text
+
+
+def _legacy_repo(tmp_path, fake_db, trigger_text=TRIGGER_TEXT):  # noqa: F811
+    """A `schema` repo as 1.0.9 left it: the table's file and the trigger's own file, committed."""
+    _init(tmp_path, "--layout", "schema")
+    scripts = tmp_path / "database"
+    write_object(scripts, TABLE, TABLE_TEXT)
+    legacy = scripts / "dbo" / "Triggers" / "trCustomer.sql"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(trigger_text)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "as 1.0.9 wrote it")
+    fake_db[TABLE] = TABLE_TEXT
+    fake_db[TRIGGER] = trigger_text
+    assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
+    return legacy
+
+
+def _head_objects(tmp_path):
+    from coop_sqlsc import git_ops
+    from coop_sqlsc.layout import objects_from_files
+
+    return objects_from_files(git_ops.read_tree(tmp_path, "HEAD", tmp_path / "database"))[0]
+
+
+def test_a_trigger_moving_out_of_its_1_0_9_file_commits_the_removal_too(tmp_path, fake_db):  # noqa: F811  # 65
+    legacy = _legacy_repo(tmp_path, fake_db)
+    changed = TRIGGER_TEXT.replace("SELECT 1", "SELECT 2")
+    fake_db[TRIGGER] = changed
+    done = json.loads(run(tmp_path, "commit", "-m", "trigger v2", "--no-pull").output)
+    assert done["ok"] and done["summary"] == {"new": 0, "changed": 1, "deleted": 0}
+    assert not legacy.exists()
+    assert _git(tmp_path, "status", "--porcelain").strip() == ""
+    assert _git(tmp_path, "show", "--name-status", "--format=", "HEAD").split() == [
+        "M",
+        "database/dbo/Tables/Customer.sql",
+        "D",
+        "database/dbo/Triggers/trCustomer.sql",
+    ]
+    assert _head_objects(tmp_path) == {TABLE: TABLE_TEXT, TRIGGER: changed}
+    assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
+
+
+def test_dropping_a_trigger_still_in_its_1_0_9_file_removes_that_file(tmp_path, fake_db):  # noqa: F811  # 65
+    legacy = _legacy_repo(tmp_path, fake_db)
+    del fake_db[TRIGGER]
+    status = json.loads(run(tmp_path, "status").output)
+    assert [(c["object"], c["action"]) for c in status["changes"]] == [("[dbo].[trCustomer]", "deleted")]
+    done = json.loads(run(tmp_path, "commit", "-m", "drop trigger", "--no-pull").output)
+    assert done["ok"] and done["summary"]["deleted"] == 1
+    assert not legacy.exists()
+    assert _git(tmp_path, "status", "--porcelain").strip() == ""
+    assert _head_objects(tmp_path) == {TABLE: TABLE_TEXT}
+    assert json.loads(run(tmp_path, "status").output)["summary"] == {"new": 0, "changed": 0, "deleted": 0}
+    # delete_object alone does the same for a trigger that sits in both places.
+    scripts = tmp_path / "database"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(TRIGGER_TEXT)
+    write_object(scripts, TRIGGER, TRIGGER_TEXT)
+    legacy.write_text(TRIGGER_TEXT)
+    read_folder(scripts)
+    delete_object(scripts, TRIGGER)
+    assert not legacy.exists() and read_folder(scripts)[0] == {TABLE: TABLE_TEXT}
+
+
+def _store(monkeypatch, *keys):
+    """A lock store with these objects checked out by dev@example.com; records releases."""
+    from datetime import datetime
+
+    from coop_sqlsc.locks import Lock
+
+    locks = {k: Lock("repo", k, "dev@example.com", "dev", datetime(2026, 10, 28, 12, 0), None) for k in keys}
+    released: list = []
+
+    class FakeStore:
+        def __init__(self, conn, transactional):
+            pass
+
+        def list(self, repo):
+            return list(locks.values())
+
+        def release(self, wanted, *, repo, who, force=False):
+            done = [k for k in wanted if k in locks]
+            for k in done:
+                locks.pop(k)
+                released.append(k)
+            return done, []
+
+    monkeypatch.setattr(cli_mod, "LockStore", FakeStore)
+    return released
+
+
+def test_checkin_commits_a_scripted_trigger_from_its_tables_file(tmp_path, fake_db, monkeypatch):  # noqa: F811  # 66
+    _init(tmp_path, "--layout", "schema")
+    fake_db[TABLE] = TABLE_TEXT
+    fake_db[TRIGGER] = TRIGGER_TEXT
+    assert json.loads(run(tmp_path, "commit", "-m", "baseline", "--no-pull").output)["ok"]
+    changed = TRIGGER_TEXT.replace("SELECT 1", "SELECT 2")
+    fake_db[TRIGGER] = changed
+    assert json.loads(run(tmp_path, "script", "dbo.trCustomer").output)["ok"]  # the file matches the database now
+    status = json.loads(run(tmp_path, "status").output)
+    # status counts the file owed to git as the trigger's change, not the table's
+    assert [(c["object"], c["action"], c["path"]) for c in status["changes"]] == [
+        ("[dbo].[trCustomer]", "changed", "dbo/Tables/Customer.sql")
+    ]
+    released = _store(monkeypatch, TRIGGER)
+    done = json.loads(run(tmp_path, "checkin", "dbo.trCustomer", "--no-pull", "--as", "dev@example.com").output)
+    assert done["ok"], done
+    assert [(f["object"], f["action"]) for f in done["files"]] == [("[dbo].[trCustomer]", "changed")]
+    assert done["commit"] and done["held_back"] == [] and released == [TRIGGER]
+    assert _head_objects(tmp_path) == {TABLE: TABLE_TEXT, TRIGGER: changed}
+    assert _git(tmp_path, "status", "--porcelain").strip() == ""
+
+
+def test_commit_and_checkin_name_the_trigger_not_the_table_and_hold_a_shared_file(tmp_path, fake_db, monkeypatch):  # noqa: F811  # 66
+    _init(tmp_path, "--layout", "schema")
+    second = ObjectKey("trigger", "dbo", "trCustomer_Touch")
+    second_text = "CREATE TRIGGER [dbo].[trCustomer_Touch] ON [dbo].[Customer] AFTER UPDATE AS\nSELECT 10;\nGO\n"
+    fake_db[TABLE] = TABLE_TEXT
+    fake_db[TRIGGER] = TRIGGER_TEXT
+    fake_db[second] = second_text
+    assert json.loads(run(tmp_path, "commit", "-m", "baseline", "--no-pull").output)["ok"]
+    # Both triggers change; the person applies both with script, then checks in only one.
+    fake_db[TRIGGER] = TRIGGER_TEXT.replace("SELECT 1", "SELECT 2")
+    fake_db[second] = second_text.replace("SELECT 10", "SELECT 20")
+    assert json.loads(run(tmp_path, "script").output)["ok"]
+    status = json.loads(run(tmp_path, "status").output)
+    assert [(c["object"], c["action"]) for c in status["changes"]] == [
+        ("[dbo].[trCustomer]", "changed"),
+        ("[dbo].[trCustomer_Touch]", "changed"),
+    ]
+    # commit of one named trigger: its file also carries the other's edit, so it waits.
+    one = json.loads(run(tmp_path, "commit", "dbo.trCustomer", "-m", "one", "--no-pull").output)
+    assert one["commit"] is None and one["files"] == []
+    assert [h["object"] for h in one["held_back"]] == ["[dbo].[trCustomer]"]
+    assert one["held_back"][0]["reason"].startswith("shares dbo/Tables/Customer.sql with an uncommitted change to ")
+    assert "[dbo].[trCustomer_Touch]" in one["held_back"][0]["reason"]
+    # checkin of one: kept checked out, not released, nothing committed.
+    released = _store(monkeypatch, TRIGGER, second)
+    kept = json.loads(run(tmp_path, "checkin", "dbo.trCustomer", "--no-pull", "--as", "dev@example.com").output)
+    assert kept["ok"] is False and kept["commit"] is None and released == []
+    assert [h["object"] for h in kept["held_back"]] == ["[dbo].[trCustomer]"]
+    assert _git(tmp_path, "log", "--oneline").count("\n") == 1
+    # Both named together: committed as one, both released, the table untouched in HEAD.
+    both = json.loads(run(tmp_path, "checkin", "--no-pull", "--as", "dev@example.com").output)
+    assert both["ok"] and both["commit"] and both["held_back"] == []
+    assert sorted(f["object"] for f in both["files"]) == ["[dbo].[trCustomer]", "[dbo].[trCustomer_Touch]"]
+    assert sorted(released, key=lambda k: k.sort_key) == [TRIGGER, second]
+    head = _head_objects(tmp_path)
+    assert head[TABLE] == TABLE_TEXT and head[TRIGGER].count("SELECT 2") == 1 and head[second].count("SELECT 20") == 1
+    assert _git(tmp_path, "status", "--porcelain").strip() == ""

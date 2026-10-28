@@ -536,10 +536,16 @@ read: `status` warns about them, and `script`, `commit`, `checkin`, `get-latest`
 and `deploy` stop with `"error": {"kind": "layout"}` before writing anything,
 because an object only such a file holds would otherwise count as missing from the
 repo (scripted a second time, or dropped by a release). Keep one layout per repo.
-`Data/` and `Migrations/` are sqlsc's own and look the same in both. A procedures
-folder spelled `Stored Procedures` (Visual Studio's import, and sqlsc 1.0.9) and a
-`Triggers/` folder (sqlsc 1.0.9) are read as well; a trigger written again moves into
-its table's file.
+`Data/` and `Migrations/` are sqlsc's own and look the same in both; a schema named
+`Data`, `Security`, `Tables` or `bin` has its own folder beside them (`Data/Tables/T.sql`
+is table `[Data].[T]`, `Data/dbo.T.sql` static data: the whole path tells them apart).
+A procedures folder spelled `Stored Procedures` (Visual Studio's import, and sqlsc
+1.0.9) and a `Triggers/` folder (sqlsc 1.0.9) are read as well; a trigger written
+again moves into its table's file, and the commit that moves it removes the old file.
+Because a table and its triggers share one file, `commit` and `checkin` find each
+object's change by reading the file object by object, and leave an object alone
+(named in `held_back`) when its file also carries an uncommitted change to an object
+you did not name: name both, or put the other edit back first.
 
 Whichever the layout, the scripts are sqlsc's: SSMS's **Schema Compare** with the
 project as target, or **Import objects**, rewrites a table file in DacFx's own shape

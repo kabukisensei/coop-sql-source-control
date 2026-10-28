@@ -22,7 +22,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .layout import key_for_path
+from .layout import _decode, _encode, key_for_path
 from .objects import ObjectKey
 
 SYNC_DIR = Path(".sqlsc") / "sync"
@@ -35,22 +35,39 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# The record's key format: 2 escapes "." and "%" (as %XX) in the schema and the
+# name, so the one dot left is the boundary between them. 1.0.10 wrote the parts
+# as they were (format 1, unmarked): `view:a.b.c` could be [a.b].[c] or [a].[b.c].
+FORMAT = 2
+_KINDS = ("schema", "table", "view", "function", "procedure", "trigger", "data")
+
+
 def _record_key(key: ObjectKey) -> str:
     """How an object is named in the record: `type:schema.name` (`type:name` for a
-    schema), since 1.0.10. Two objects can share one file (a table and its triggers in
-    the `schema` layout), so a file path would not do."""
-    return f"{key.type}:{key.name}" if key.type == "schema" else f"{key.type}:{key.schema}.{key.name}"
+    schema), the schema and the name each with "." and "%" escaped as %XX, so a
+    dot inside either cannot be read as the boundary (#64). Two objects can share
+    one file (a table and its triggers in the `schema` layout), so a file path
+    would not do."""
+    if key.type == "schema":
+        return f"{key.type}:{_encode(key.name, dot=True)}"
+    return f"{key.type}:{_encode(key.schema, dot=True)}.{_encode(key.name, dot=True)}"
 
 
-def _key_from_record(text: str) -> ObjectKey | None:
-    """A record key back to the object: the `type:` form, or a file path written by
-    1.0.9 and before (read in the active layout; a record is one clone's, one layout's)."""
+def _key_from_record(text: str, fmt: int) -> ObjectKey | None:
+    """A record key back to the object: the escaped `type:` form (format 2), the
+    plain one 1.0.10 wrote (format 1; a key with more than one dot is ambiguous
+    and is dropped, so neither reading is guessed), or a file path written by
+    1.0.9 and before (read in the active layout; a record is one clone's)."""
     kind, colon, rest = text.partition(":")
-    if colon and kind in ("schema", "table", "view", "function", "procedure", "trigger", "data"):
+    if colon and kind in _KINDS:
         if kind == "schema":
-            return ObjectKey(kind, "", rest)
+            return ObjectKey(kind, "", _decode(rest) if fmt >= 2 else rest)
         schema, dot, name = rest.partition(".")
-        return ObjectKey(kind, schema, name) if dot and name else None
+        if not dot or not name:
+            return None
+        if fmt >= 2:
+            return ObjectKey(kind, _decode(schema), _decode(name))
+        return ObjectKey(kind, schema, name) if "." not in name else None
     return key_for_path(text)
 
 
@@ -71,8 +88,11 @@ class SyncRecord:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            fmt = raw.get("format") if isinstance(raw.get("format"), int) else 1
             for rel, value in (raw.get("objects") or {}).items():
-                key = _key_from_record(rel)
+                key = _key_from_record(rel, fmt)
                 if key is not None and isinstance(value, str):
                     hashes[key] = value
         return cls(path, hashes)
@@ -83,6 +103,7 @@ class SyncRecord:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "note": "Written by sqlsc: the last text each object was seen with on both sides. Safe to delete.",
+            "format": FORMAT,
             "objects": {_record_key(k): v for k, v in sorted(self.hashes.items(), key=lambda kv: kv[0].sort_key)},
         }
         self.path.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
