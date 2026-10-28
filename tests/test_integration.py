@@ -114,7 +114,7 @@ def test_changed_and_deleted_objects_show_up(tmp_path, server, make_db):
 
     diff = sqlsc(config, "diff", "sales.Customer")
     assert len(diff["changes"]) == 1
-    assert "+     ,Phone varchar(20) NULL" in diff["changes"][0]["diff"]
+    assert "+    [Phone]       VARCHAR (20)    NULL," in diff["changes"][0]["diff"]
 
     sqlsc(config, "script")
     assert not (tmp_path / "database" / "Functions" / "dbo.fn_Double.sql").exists()

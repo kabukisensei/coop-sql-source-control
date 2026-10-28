@@ -90,6 +90,28 @@ def batches(text: str) -> list[str]:
     return [b.strip() for b in out if b.strip()]
 
 
+def batch_pieces(text: str) -> list[tuple[str, str]]:
+    """The script's batches as `batches` reads them, each with its piece of the text as
+    written: from the end of the previous GO line (so the blank lines before the batch
+    belong to it) to the end of its own GO line. Joined, the pieces give back the text.
+    For rewriting part of a file without reformatting the rest."""
+    masked = "".join(run if kind == "code" or run.startswith("--") else _mask(run) for kind, run in sqltext.runs(text))
+    out: list[tuple[str, str]] = []
+    start = 0
+    for match in _GO.finditer(masked):
+        end = match.end()
+        if end < len(text) and text[end] == "\n":
+            end += 1
+        batch = text[start : match.start()].strip()
+        if batch:
+            out.append((batch, text[start:end]))
+            start = end
+    tail = text[start:].strip()
+    if tail:
+        out.append((tail, text[start:]))
+    return out
+
+
 def _mask(run: str) -> str:
     """The run with every character but a line break replaced, same length."""
     return "".join("\n" if ch == "\n" else "x" for ch in run)

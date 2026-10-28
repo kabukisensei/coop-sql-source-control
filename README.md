@@ -547,17 +547,27 @@ object's change by reading the file object by object, and leave an object alone
 (named in `held_back`) when its file also carries an uncommitted change to an object
 you did not name: name both, or put the other edit back first.
 
-Whichever the layout, the scripts are sqlsc's: SSMS's **Schema Compare** with the
-project as target, or **Import objects**, rewrites a table file in DacFx's own shape
-(constraints inline), which `get-latest` then holds back as a hand edit rather than
-working out the `ALTER` statements. Write the repo with `script` and `commit` (the
-window, the CLI or coop) and use Schema Compare to look; views, procedures,
-functions and triggers are applied as written whoever wrote them.
+Tables are scripted the way SSMS 22's DacFx writes them (1.0.11): **Create Project
+from Database** and Schema Compare's **Update** into the project write the same file
+sqlsc writes, byte for byte apart from line endings (`.gitattributes` settles those),
+so neither rewrites the other's files. A table file is read whatever wrote it: DacFx,
+sqlsc before 1.0.11 (constraints as `ALTER TABLE` statements after the table), or a
+person, and two files that describe the same table compare as the same. A table
+change made in SSMS and saved into the repo is applied by `get-latest` like any
+other. What sqlsc does not script is not read either: a table file with index
+options, a filegroup, `ROWGUIDCOL` or `SPARSE` shows as changed and `get-latest`
+holds it back, naming what it could not read. Extended properties
+(`sp_addextendedproperty`, MS_Description) are not tracked: they never count as a
+change, are not applied, and stay in the file when sqlsc rewrites the table. DacFx
+does not script whether a constraint is trusted, so a constraint added `WITH NOCHECK`
+reads as an ordinary one; a disabled one keeps its `NOCHECK CONSTRAINT` line. On a
+Fabric Warehouse, whose keys take only `ALTER TABLE ... NOT ENFORCED`, tables keep
+sqlsc's own shape.
 
-Scripts are deterministic: the same object always produces the same bytes, names
-are bracketed only where needed, column lists use Cooptimize's leading-comma
-layout, and constraint names SQL Server generated itself (`PK__Tag__3214EC07…`)
-are left out because they differ in every database. Views, procedures, functions
+Scripts are deterministic: the same object always produces the same bytes, tables
+follow DacFx (every name bracketed, types upper case, columns aligned), and
+constraint names SQL Server generated itself (`PK__Tag__3214EC07…`) are left out
+because they differ in every database. Views, procedures, functions
 and triggers are stored exactly as written, with line endings and trailing
 spaces normalized outside string literals and quoted names. Inside a literal
 every space and line break is the value: it is kept, and a change there is a

@@ -22,28 +22,61 @@ def edit(path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new))
 
 
-def test_get_latest_alters_tables_and_keeps_their_rows(tmp_path, server, make_db):
+# The same edits in each table shape a repo can hold: DacFx's (SSMS 22, and sqlsc since
+# 1.0.11) and sqlsc's own from before 1.0.11.
+EDITS = {
+    "dacfx": [
+        ("[Name]        NVARCHAR (100)  NOT NULL,", "[Name]        NVARCHAR (200)  NOT NULL,"),
+        ("DEFAULT ('A')", "DEFAULT ('I')"),
+        (
+            "    [CreditLimit] DECIMAL (19, 4) NULL,\n",
+            "    [CreditLimit] DECIMAL (19, 4) NULL,\n    [Phone] VARCHAR (20) NULL,\n",
+        ),
+        ("    CONSTRAINT [CK_Customer_Status] CHECK ([Status]='I' OR [Status]='A'),\n", ""),
+    ],
+    "sqlsc": [
+        ("     ,Name nvarchar(100) NOT NULL\n", "     ,Name nvarchar(200) NOT NULL\n"),
+        ("DEFAULT ('A')", "DEFAULT ('I')"),
+        (
+            "     ,CreditLimit decimal(19, 4) NULL\n",
+            "     ,CreditLimit decimal(19, 4) NULL\n     ,Phone varchar(20) NULL\n",
+        ),
+        (
+            "ALTER TABLE sales.Customer ADD CONSTRAINT CK_Customer_Status CHECK ([Status]='I' OR [Status]='A');\nGO\n",
+            "",
+        ),
+    ],
+}
+INDEX = {
+    "dacfx": "CREATE NONCLUSTERED INDEX [IX_Customer_Email]\n    ON [sales].[Customer]([Email] ASC);\n\n\nGO\n",
+    "sqlsc": "CREATE NONCLUSTERED INDEX IX_Customer_Email ON sales.Customer (Email);\nGO\n",
+}
+
+
+def to_sqlsc_shape(folder) -> None:
+    """Rewrites every table file the way sqlsc scripted tables before 1.0.11."""
+    from coop_sqlsc.tablefile import sqlsc_shape
+
+    for path in (folder / "Tables").glob("*.sql"):
+        path.write_text(sqlsc_shape(path.read_text()))
+
+
+@pytest.mark.parametrize("shape", ["dacfx", "sqlsc"])
+def test_get_latest_alters_tables_and_keeps_their_rows(tmp_path, server, make_db, shape):
     db = make_db(SAMPLE.read_text())
     config = link(tmp_path, server, db)
     sqlsc(config, "script")
+    if shape == "sqlsc":
+        to_sqlsc_shape(tmp_path / "database")
+        assert sqlsc(config, "status")["changes"] == []  # an older repo reads clean
     conn = connect(server, db)
     run_script(conn, "INSERT INTO sales.Customer (Name, Email) VALUES ('Ada', 'ada@example.com'), ('Bo', NULL);")
 
     customer = tmp_path / "database" / "Tables" / "sales.Customer.sql"
-    edit(customer, "     ,Name nvarchar(100) NOT NULL\n", "     ,Name nvarchar(200) NOT NULL\n")
-    edit(customer, "DEFAULT ('A')", "DEFAULT ('I')")
-    edit(
-        customer,
-        "     ,CreditLimit decimal(19, 4) NULL\n",
-        "     ,CreditLimit decimal(19, 4) NULL\n     ,Phone varchar(20) NULL\n",
-    )
-    edit(
-        customer,
-        "ALTER TABLE sales.Customer ADD CONSTRAINT CK_Customer_Status CHECK ([Status]='I' OR [Status]='A');\nGO\n",
-        "",
-    )
+    for old, new in EDITS[shape]:
+        edit(customer, old, new)
     with customer.open("a") as handle:
-        handle.write("CREATE NONCLUSTERED INDEX IX_Customer_Email ON sales.Customer (Email);\nGO\n")
+        handle.write(INDEX[shape])
     view = tmp_path / "database" / "Views" / "sales.vCustomerTotals.sql"
     edit(view, "SUM(o.Amount) AS Total", "SUM(o.Amount) AS Total\n     ,COUNT(*) AS Orders")
 
@@ -69,7 +102,7 @@ def test_drops_need_allow_drops(tmp_path, server, make_db):
     (tmp_path / "database" / "Stored Procedures" / "sales.usp_GetCustomer.sql").unlink()
     edit(
         tmp_path / "database" / "Tables" / "sales.Customer.sql",
-        "     ,Notes nvarchar(max) COLLATE Latin1_General_100_CI_AS NULL\n",
+        "    [Notes]       NVARCHAR (MAX)  COLLATE Latin1_General_100_CI_AS NULL,\n",
         "",
     )
 

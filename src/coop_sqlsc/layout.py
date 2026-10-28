@@ -37,11 +37,13 @@ cli sets it from the config with use_layout().
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 from . import sqltext
-from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey, batches, normalize
+from .objects import OBJECT_TYPES, TYPE_LABELS, ObjectKey, batch_pieces, batches, normalize
+from .tablefile import extended_property, is_sqlsc_shape
 
 TYPE_LAYOUT, SCHEMA_LAYOUT = "type", "schema"
 LAYOUTS = (TYPE_LAYOUT, SCHEMA_LAYOUT)
@@ -417,10 +419,36 @@ def split_table_file(table: ObjectKey, text: str) -> tuple[str, dict[ObjectKey, 
 
 
 def join_table_file(table_text: str, triggers: dict[ObjectKey, str]) -> str:
-    """The table's script with its triggers after it, in name order: the file DacFx shape."""
-    parts = [table_text.rstrip("\n")] if table_text else []
-    parts += [triggers[k].rstrip("\n") for k in sorted(triggers, key=lambda k: k.sort_key)]
+    """The table's script with its triggers after it, in name order. A table in DacFx's
+    shape gets DacFx's spacing too: a blank line after each part, one blank line before
+    a trigger's GO, and a blank line at the end. A table in sqlsc's shape (1.0.10)
+    keeps sqlsc's: parts back to back."""
+    texts = [triggers[k] for k in sorted(triggers, key=lambda k: k.sort_key)]
+    if table_text.strip() and not is_sqlsc_shape(table_text):
+        return dacfx_file_text("\n".join([table_text.rstrip("\n") + "\n", *(_dacfx_trigger(t) for t in texts)]))
+    parts = [table_text.rstrip("\n")] if table_text.strip() else []
+    parts += [t.rstrip("\n") for t in texts]
     return normalize("\n".join(parts))
+
+
+_SCRIPTED_GO = re.compile(r"(?<!\n)\nGO\n?$")
+
+
+def _dacfx_trigger(text: str) -> str:
+    """A trigger's script as DacFx writes it in a table file: a blank line before its
+    last GO. A text from the file already has it and is left as it is."""
+    text = text.rstrip("\n")
+    return _SCRIPTED_GO.sub("\n\nGO", text) + "\n"
+
+
+def dacfx_file_text(text: str) -> str:
+    """A DacFx-shape table file's text: normalized, then the blank line DacFx ends it with."""
+    return normalize(text) + "\n"
+
+
+def table_file_text(text: str) -> str:
+    """What a table's file holds for this script: DacFx's ending for its shape."""
+    return text if is_sqlsc_shape(text) else dacfx_file_text(text)
 
 
 def write_object(root: Path, key: ObjectKey, script: str) -> Path:
@@ -434,20 +462,59 @@ def write_object(root: Path, key: ObjectKey, script: str) -> Path:
         return _write_into_table_file(root, _trigger_homes[key], {key: normalize(script)})
     if _active == SCHEMA_LAYOUT and key.type == "table":
         return _write_into_table_file(root, key, {}, table_text=normalize(script))
-    return _write_file(root / relative_path(key), script)
+    path = root / relative_path(key)
+    if key.type == "table":
+        kept = _kept_pieces(normalize(path.read_text(encoding="utf-8-sig"))) if path.is_file() else ""
+        if kept:
+            script = normalize(script.rstrip("\n") + "\n" + kept)
+        script = table_file_text(normalize(script))
+    return _write_file(path, script)
+
+
+def _kept_pieces(table_text: str) -> str:
+    """The pieces of a table's script sqlsc keeps but does not track, as written: the
+    extended properties (MS_Description and the like) DacFx writes into the file. sqlsc
+    rewriting the table from the database must not take a person's descriptions out."""
+    return "".join(piece for batch, piece in batch_pieces(table_text) if extended_property(batch))
+
+
+def _split_raw(table: ObjectKey, text: str) -> tuple[str, dict[ObjectKey, str]]:
+    """split_table_file, with each part as written in the file (blank lines and all)."""
+    own: list[str] = []
+    triggers: dict[ObjectKey, str] = {}
+    pending: list[str] = []
+    for batch, piece in batch_pieces(text):
+        found = sqltext.declaration(batch)
+        if found is not None and sqltext.trigger_target(batch) is not None:
+            key = ObjectKey("trigger", found.schema or table.schema, found.name)
+            triggers[key] = "".join([*pending, piece]).lstrip("\n")
+            pending = []
+        elif batch.upper().startswith(_SET_ONLY):
+            pending.append(piece)
+        else:
+            own += pending
+            pending = []
+            own.append(piece)
+    own += pending
+    return "".join(own).lstrip("\n"), triggers
 
 
 def _write_into_table_file(
     root: Path, table: ObjectKey, triggers: dict[ObjectKey, str], *, table_text: str | None = None
 ) -> Path:
-    """Rewrites a `schema`-layout table file keeping what it does not change: the table's
-    own script (unless `table_text` replaces it) and the other triggers in it."""
+    """Rewrites a `schema`-layout table file keeping what it does not change, as it is
+    written: the table's own script (unless `table_text` replaces it; its extended
+    properties stay even then) and the other triggers in it."""
     path = root / relative_path(table)
-    current_text, current = ("", {})
+    raw_own, raw_triggers = "", {}
     if path.is_file():
-        current_text, current = split_table_file(table, normalize(path.read_text(encoding="utf-8-sig")))
-    current.update(triggers)
-    return _write_file(path, join_table_file(current_text if table_text is None else table_text, current))
+        current = normalize(path.read_text(encoding="utf-8-sig"))
+        split_table_file(table, current)  # learns where each trigger in it lives
+        raw_own, raw_triggers = _split_raw(table, current)
+    if table_text is not None:
+        kept = _kept_pieces(raw_own)
+        raw_own = table_text.rstrip("\n") + "\n" + kept if kept else table_text
+    return _write_file(path, join_table_file(raw_own, {**raw_triggers, **triggers}))
 
 
 def _write_file(path: Path, script: str) -> Path:
@@ -479,10 +546,10 @@ def delete_object(root: Path, key: ObjectKey) -> Path:
         if key in _trigger_homes and path.is_file():
             # Take the trigger's batch out of its table's file; the file goes when nothing is left.
             table = _trigger_homes[key]
-            table_text, triggers = split_table_file(table, normalize(path.read_text(encoding="utf-8-sig")))
+            table_text, triggers = _split_raw(table, normalize(path.read_text(encoding="utf-8-sig")))
             if key in triggers:
                 triggers.pop(key)
-                if table_text or triggers:
+                if table_text.strip() or triggers:
                     _write_file(path, join_table_file(table_text, triggers))
                 else:
                     _unlink(path)

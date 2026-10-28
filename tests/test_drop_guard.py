@@ -30,7 +30,7 @@ def test_a_column_a_plain_view_reads_is_not_dropped(tmp_path, server, make_db):
     config = link(tmp_path, server, db)
     sqlsc(config, "script")
     table = tmp_path / "database" / "Tables" / "dbo.Orders.sql"
-    table.write_text(table.read_text().replace("     ,OrderedAt date NULL\n", ""))
+    table.write_text(table.read_text().replace("    [OrderedAt] DATE            NULL,\n", ""))
 
     refused = sqlsc(config, "get-latest", "--allow-drops")
     assert refused["ok"] is False and refused["transaction"] is True
@@ -47,7 +47,7 @@ def test_a_column_only_a_procedure_reads_is_not_dropped_and_an_unused_one_is(tmp
     table = tmp_path / "database" / "Tables" / "dbo.Orders.sql"
     original = table.read_text()
 
-    table.write_text(original.replace("     ,Spare int NULL\n", ""))
+    table.write_text(original.replace("    [Spare]     INT             NULL,\n", ""))
     refused = sqlsc(config, "get-latest", "--allow-drops")
     assert "is still used by [dbo].[usp_Spare]" in refused["failed"][0]["error"]
 

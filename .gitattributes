@@ -1,1 +1,3 @@
 * text=auto eol=lf
+# DacFx samples from SSMS 22 (CRLF, bare LFs in a trigger body): byte-exact.
+tests/dacfx/** -text

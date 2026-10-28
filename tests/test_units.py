@@ -15,7 +15,17 @@ from coop_sqlsc.config import ConfigError, build_target, load
 from coop_sqlsc.connect import connection_string, pack_token, pick_driver
 from coop_sqlsc.layout import key_for_path, read_folder, relative_path, use_layout, write_object
 from coop_sqlsc.objects import ObjectKey, normalize
-from coop_sqlsc.scripter import Column, ForeignKey, KeyConstraint, Table, quote, script_module, script_table, type_text
+from coop_sqlsc.scripter import (
+    Column,
+    ForeignKey,
+    KeyConstraint,
+    Table,
+    quote,
+    script_module,
+    script_table,
+    script_table_sqlsc,
+    type_text,
+)
 
 # --- layout -------------------------------------------------------------------------
 
@@ -96,7 +106,8 @@ def test_system_named_constraints_leave_their_name_out():
         columns=[Column("Id", "int", nullable=False)],
         keys=[KeyConstraint(None, True, "CLUSTERED", [("Id", False)])],
     )
-    assert "ALTER TABLE dbo.T ADD PRIMARY KEY CLUSTERED (Id);" in script_table(table, database_collation=None)
+    assert "    PRIMARY KEY CLUSTERED ([Id] ASC)\n" in script_table(table, database_collation=None)
+    assert "ALTER TABLE dbo.T ADD PRIMARY KEY CLUSTERED (Id);" in script_table_sqlsc(table, database_collation=None)
 
 
 def test_module_set_options_only_when_off():

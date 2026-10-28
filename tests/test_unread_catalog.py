@@ -75,7 +75,7 @@ def fake_connection(rows: dict, failing: set[str] = frozenset()):
 
 def test_a_healthy_read_scripts_the_index():
     result = catalog.read_database(fake_connection(HEALTHY), TARGET)
-    assert "CREATE NONCLUSTERED INDEX IX_T ON dbo.T (Id);" in result.objects[TABLE]
+    assert "CREATE NONCLUSTERED INDEX [IX_T]\n    ON [dbo].[T]([Id] ASC);" in result.objects[TABLE]
     assert result.unread == {} and result.warnings == []
     assert SCHEMA in result.objects
 
