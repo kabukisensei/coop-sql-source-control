@@ -28,7 +28,7 @@ optional on top; none of them has to be used.
 From a release (the `.whl` on the [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)):
 
 ```powershell
-pipx install .\coop_sql_source_control-1.0.10-py3-none-any.whl
+pipx install .\coop_sql_source_control-1.0.11-py3-none-any.whl
 ```
 
 or straight from the repo, which needs a GitHub sign-in:
@@ -652,6 +652,6 @@ column type, and releases by tag to a protected target.
 5. **SSMS add-in**: a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
 6. **Migration scripts**: hand-written, run-once scripts around the structural changes.
 7. **Compile check and the agent's mark** (1.0.8): a SQL project for `dotnet build`, `Prepared-by:` trailers, the drift pipeline.
-8. **Living with SSMS's Database DevOps** (1.0.9 and 1.0.10): the `schema` layout SSMS and SqlPackage write (triggers in the table's file, `StoredProcedures`), a project SSMS opens, BOMs kept.
+8. **Living with SSMS's Database DevOps** (1.0.9 to 1.0.11): the `schema` layout SSMS and SqlPackage write (triggers in the table's file, `StoredProcedures`), a project SSMS opens, BOMs kept, and table files in DacFx's own shape, written and read.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).
