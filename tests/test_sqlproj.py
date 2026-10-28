@@ -36,7 +36,7 @@ def test_init_with_sqlproj_writes_the_project_and_ignores_the_build_output(tmp_p
     text = (tmp_path / "database" / "WHGold.sqlproj").read_text(encoding="utf-8")
     assert 'Sdk="Microsoft.Build.Sql/' in text
     assert "<DSP>Microsoft.Data.Tools.Schema.Sql.SqlDwUnifiedDatabaseSchemaProvider</DSP>" in text
-    assert '<Build Remove="Data/**" />' in text and '<Build Remove="Migrations/**" />' in text
+    assert '<Build Remove="Data/*.sql" />' in text and '<Build Remove="Migrations/*.sql" />' in text
     ignored = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ".sqlsc/" in ignored and "bin/" in ignored and "obj/" in ignored
     # Run again: the project is left as it is (people edit it), the ignore lines are not repeated.

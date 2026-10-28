@@ -394,7 +394,9 @@ changes `ALTER` cannot make safely are still held back with the reason.
 
 `sqlsc sqlproj` (or `sqlsc init --sqlproj`) writes `<folder>/<database>.sqlproj`, an
 SDK-style SQL project (`Microsoft.Build.Sql`) over the scripts folder: every object
-file is in it, `Data/` and `Migrations/` are not, and the target platform follows
+file is in it, the files directly in `Data/` and `Migrations/` are not (a schema named
+Data or Migrations keeps its objects; a project written before that fix drops them, so
+rewrite it with `sqlsc sqlproj --force`), and the target platform follows
 the target's kind (SQL Server, Azure SQL and Fabric SQL database, Fabric Warehouse,
 or the serverless endpoint for a Lakehouse and Synapse). Then
 
