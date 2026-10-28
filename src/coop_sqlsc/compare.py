@@ -16,6 +16,7 @@ from .layout import relative_path
 from .objects import TYPE_LABELS, ObjectKey, batches
 from .sqltext import same_line_endings
 from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
+from .tablefile import is_sqlsc_shape, sqlsc_shape
 
 NEW, CHANGED, DELETED = "new", "changed", "deleted"
 
@@ -55,8 +56,14 @@ class Change:
         }
 
     def unified_diff(self, *, context: int = 3) -> str:
-        before = (self.file_text or "").splitlines(keepends=True)
-        after = (self.db_text or "").splitlines(keepends=True)
+        before_text, after_text = self.file_text or "", self.db_text or ""
+        if self.key.type == "table" and before_text and after_text:
+            # A file in sqlsc's pre-1.0.11 shape against the database's DacFx script:
+            # diff both in one shape, so the diff shows the change, not the layout.
+            if is_sqlsc_shape(before_text) != is_sqlsc_shape(after_text):
+                before_text, after_text = sqlsc_shape(before_text), sqlsc_shape(after_text)
+        before = before_text.splitlines(keepends=True)
+        after = after_text.splitlines(keepends=True)
         return "".join(
             difflib.unified_diff(before, after, fromfile=f"repo/{self.path}", tofile=f"database/{self.path}", n=context)
         )
@@ -94,7 +101,11 @@ ORIGIN_WORDS = {DATABASE: "Database", REPO: "Repo", BOTH: "Both", UNKNOWN: ""}
 
 
 def comparable(key: ObjectKey, text: str) -> str:
-    """The text two sides are compared on. For a table, the order of its columns and
+    """The text two sides are compared on. A table is read into the sqlsc shape first
+    (tablefile.sqlsc_shape), so a file SSMS / DacFx wrote, one sqlsc wrote before 1.0.11
+    and the database's script compare alike when they describe the same table; a file
+    in the old shape compares on exactly the text it always did, so sync records stay
+    valid. For a table, the order of its columns and
     of the statements after CREATE TABLE does not count: ALTER TABLE can only add
     columns at the end, so a column inserted mid-table in the repo would otherwise
     differ forever (SQL Compare ignores column order by default too). A line break
@@ -106,7 +117,7 @@ def comparable(key: ObjectKey, text: str) -> str:
         return _comparable_data(text)
     if key.type != "table":
         return text
-    lines = text.split("\n")
+    lines = sqlsc_shape(text).split("\n")
     try:
         open_at, close_at = lines.index("("), lines.index(");")
     except ValueError:

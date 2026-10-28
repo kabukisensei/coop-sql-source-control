@@ -36,6 +36,7 @@ from .migrations import BEFORE, Migration
 from .objects import ObjectKey, batches
 from .scripter import qualified, quote
 from .sqltext import declared_as
+from .tablefile import sqlsc_shape, unreadable_reason
 
 # Order steps run in. Drops of code objects go first so nothing they read blocks
 # a table change; static data once its tables (and their triggers) exist; table
@@ -176,7 +177,9 @@ def _create_steps(key: ObjectKey, text: str) -> list[Step]:
     if key.type == "schema":
         return [Step(key, "create", PH_SCHEMA, parts)]
     if key.type == "table":
-        # Foreign keys wait until every new table exists.
+        # A DacFx file's constraints are inside its CREATE TABLE: in the sqlsc shape they
+        # are statements of their own, so foreign keys can wait until every new table exists.
+        parts = batches(sqlsc_shape(text))
         plain = [b for b in parts if not _is_foreign_key(b)]
         keys = [b for b in parts if _is_foreign_key(b)]
         out = [Step(key, "create", PH_TABLE, plain)]
@@ -371,13 +374,19 @@ class ParsedTable:
 
 
 def parse_table(text: str) -> ParsedTable:
+    """The table in the sqlsc shape, whatever shape its text is in (tablefile.sqlsc_shape)."""
+    reason = unreadable_reason(text)
+    text = sqlsc_shape(text)
     parts = batches(text)
     if not parts or not parts[0].upper().startswith("CREATE TABLE"):
         raise ManualChange("the table script does not start with CREATE TABLE")
     lines = parts[0].split("\n")
     name = lines[0][len("CREATE TABLE") :].strip()
     if len(lines) < 3 or lines[1].strip() != "(" or lines[-1].strip() != ");":
-        raise ManualChange("the CREATE TABLE layout was edited by hand; ALTER statements cannot be worked out")
+        why = f" ({reason})" if reason else ""
+        raise ManualChange(
+            f"the table script holds something sqlsc cannot read{why}; ALTER statements cannot be worked out"
+        )
     columns: dict[str, str] = {}
     order: list[str] = []
     for line in lines[2:-1]:
