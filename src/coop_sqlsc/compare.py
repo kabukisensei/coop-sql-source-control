@@ -14,8 +14,8 @@ from dataclasses import dataclass
 
 from .layout import relative_path
 from .objects import TYPE_LABELS, ObjectKey, batches
-from .sqltext import same_line_endings
-from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord
+from .sqltext import runs, same_line_endings
+from .sync import BOTH, DATABASE, REPO, UNKNOWN, SyncRecord, digest
 from .tablefile import is_sqlsc_shape, sqlsc_shape
 
 NEW, CHANGED, DELETED = "new", "changed", "deleted"
@@ -88,7 +88,10 @@ def compare(db: dict[ObjectKey, str], folder: dict[ObjectKey, str], sync: SyncRe
             if sync is not None and db_c is not None:
                 sync.record(key, db_c)
             continue
-        origin = sync.origin(key, db_c, file_c) if sync is not None else UNKNOWN
+        if sync is None or _legacy_record(key, sync, (db_text, file_text), (db_c, file_c)):
+            origin = UNKNOWN
+        else:
+            origin = sync.origin(key, db_c, file_c)
         changes.append(Change(key, action, db_text, file_text, origin))
     if sync is not None:
         for key in [k for k in sync.hashes if k not in db and k not in folder]:
@@ -122,9 +125,61 @@ def comparable(key: ObjectKey, text: str) -> str:
         open_at, close_at = lines.index("("), lines.index(");")
     except ValueError:
         return text
+    columns = sorted(_column_units("\n".join(lines[open_at + 1 : close_at])))
+    rest = sorted(batches("\n".join(lines[close_at + 1 :])))
+    return "\n".join(lines[: open_at + 1] + columns + [");"] + rest)
+
+
+def _column_units(body: str) -> list[str]:
+    """The lines of a table's column list, one unit per column: a line break inside a
+    string literal, a quoted name or a block comment does not end a unit, so a
+    multiline DEFAULT literal stays one unit with its bytes as written (#71). Each
+    unit loses only its outer spacing and a leading comma, the way a one-line column
+    always has, so a sync record of a table without such a literal stays valid."""
+    units: list[str] = []
+    current: list[str] = []
+    for kind, part in runs(body):
+        if kind != "code":
+            current.append(part)
+            continue
+        pieces = part.split("\n")
+        for piece in pieces[:-1]:
+            current.append(piece)
+            units.append("".join(current))
+            current = []
+        current.append(pieces[-1])
+    units.append("".join(current))
+    return [unit.strip().lstrip(",").strip() for unit in units]
+
+
+def _legacy_comparable(key: ObjectKey, text: str) -> str:
+    """comparable as it was before #71: every physical line of the column list on its
+    own. Only read to recognise a sync record written in that form."""
+    lines = sqlsc_shape(same_line_endings(text)).split("\n")
+    try:
+        open_at, close_at = lines.index("("), lines.index(");")
+    except ValueError:
+        return comparable(key, text)
     columns = sorted(line.strip().lstrip(",").strip() for line in lines[open_at + 1 : close_at])
     rest = sorted(batches("\n".join(lines[close_at + 1 :])))
     return "\n".join(lines[: open_at + 1] + columns + [");"] + rest)
+
+
+def _legacy_record(
+    key: ObjectKey, sync: SyncRecord, texts: tuple[str | None, ...], comparables: tuple[str | None, ...]
+) -> bool:
+    """True when the sync record of a table matches a side only in the pre-#71 form,
+    which hid changes inside a multiline literal: which side moved is then unknown."""
+    last = sync.hashes.get(key)
+    if key.type != "table" or last is None:
+        return False
+    for text, now in zip(texts, comparables, strict=True):
+        if text is None or now is None:
+            continue
+        legacy = _legacy_comparable(key, text)
+        if legacy != now and digest(legacy) == last:
+            return True
+    return False
 
 
 def _comparable_data(text: str) -> str:
