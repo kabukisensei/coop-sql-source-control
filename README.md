@@ -28,7 +28,7 @@ optional on top; none of them has to be used.
 From a release (the `.whl` on the [releases page](https://github.com/kabukisensei/coop-sql-source-control/releases)):
 
 ```powershell
-pipx install .\coop_sql_source_control-1.0.12-py3-none-any.whl
+pipx install .\coop_sql_source_control-1.0.13-py3-none-any.whl
 ```
 
 or straight from the repo, which needs a GitHub sign-in:
