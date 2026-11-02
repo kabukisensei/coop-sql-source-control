@@ -43,8 +43,29 @@ def test_a_change_inside_a_multiline_table_literal_is_a_difference(render, db_va
     repo = render(table(repo_value), database_collation=None)
     changes = compare({KEY: db}, {KEY: repo})
     assert [(c.key, c.action) for c in changes] == [(KEY, CHANGED)]
-    plan = build_plan(changes, allow_drops=False)
-    assert plan.steps, "the change must reach the deploy plan"
+    for allow_drops in (False, True):
+        plan = build_plan(changes, allow_drops=allow_drops)
+        # the deploy plan replaces the default with the whole literal (#74): never a
+        # column-order skip, and never a column added or dropped that is not there
+        assert [(s.key, s.action) for s in plan.steps] == [(KEY, "alter")]
+        statements = plan.steps[0].statements
+        assert len(statements) == 2
+        assert "DROP CONSTRAINT" in statements[0] and "N'Message'" in statements[0]
+        assert statements[1] == f"ALTER TABLE dbo.LiteralFixture ADD DEFAULT ({repo_value}) FOR Message"
+        assert not any(" DROP COLUMN " in s or " ADD Message " in s for s in statements)
+
+
+@pytest.mark.parametrize("render", RENDERERS)
+def test_a_new_column_with_a_multiline_default_is_one_column(render):
+    value = "N'first\nalpha\nbeta'"
+    old = Table("dbo", "LiteralFixture", columns=[Column("Id", "int", nullable=False)])
+    db = render(old, database_collation=None)
+    repo = render(table(value), database_collation=None)
+    plan = build_plan(compare({KEY: db}, {KEY: repo}), allow_drops=True)
+    assert [(s.key, s.action) for s in plan.steps] == [(KEY, "alter")]
+    assert len(plan.steps[0].statements) == 1
+    assert plan.steps[0].statements[0].startswith("ALTER TABLE dbo.LiteralFixture ADD Message nvarchar(200) NULL")
+    assert plan.steps[0].statements[0].endswith(f"DEFAULT ({value})")
 
 
 @pytest.mark.parametrize("render", RENDERERS)
