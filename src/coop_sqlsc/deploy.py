@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import migrations
-from .compare import CHANGED, DELETED, NEW, Change
+from .compare import CHANGED, DELETED, NEW, Change, _column_units
 from .config import Target
 from .data import identity_off
 from .locks import CREATE_SCHEMA
@@ -361,7 +361,8 @@ def _mask_comments_and_strings(text: str) -> str:
 
 _COLUMN = re.compile(
     r"^(?P<type>.+?)(?: COLLATE (?P<collation>\S+))?(?: IDENTITY\((?P<identity>[^)]*)\))?"
-    r" (?P<null>NOT NULL|NULL)(?: CONSTRAINT (?P<dfname>\[(?:[^\]]|\]\])+\]|\S+))?(?: DEFAULT (?P<default>.+))?$"
+    r" (?P<null>NOT NULL|NULL)(?: CONSTRAINT (?P<dfname>\[(?:[^\]]|\]\])+\]|\S+))?(?: DEFAULT (?P<default>.+))?$",
+    re.DOTALL,  # a multiline DEFAULT literal is one definition (#74)
 )
 
 
@@ -389,8 +390,9 @@ def parse_table(text: str) -> ParsedTable:
         )
     columns: dict[str, str] = {}
     order: list[str] = []
-    for line in lines[2:-1]:
-        body = line.strip().lstrip(",").strip()
+    # One unit per column, the way compare reads them: a line break inside a string
+    # literal, quoted name or block comment does not end a column (#74).
+    for body in _column_units("\n".join(lines[2:-1])):
         if not body:
             continue
         col, rest = _split_name(body)
