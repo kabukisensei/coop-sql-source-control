@@ -450,16 +450,17 @@ namespace CoopSqlSourceControl
             var result = await RunAsync("Updating " + target.Name + "…", t => client.GetLatestAsync(target.Name, names, false, t), acceptFailure: true);
             if (result == null)
             {
+                // Cancelled, or sqlsc stopped without an answer to read: what ran is unknown.
+                // RunAsync said why (details in Output); keep that, and say so.
+                Say(GetLatestReport.Unknown(target.Name, StatusText.Text));
                 return;
             }
 
-            var failed = TargetInfo.Items(result.Json, "failed").Select(f => f.Value<string>("object") + ": " + f.Value<string>("error")).ToList();
-            var kept = TargetInfo.Items(result.Json, "kept").Select(k => k.Value<string>("object")).ToList();
+            // Worked out before Refresh, and said after it, so the grid's summary does not
+            // replace what this update did and did not leave applied.
+            var report = GetLatestReport.Describe(target.Name, result.Json);
             await RefreshAsync();
-            Say((failed.Count == 0
-                    ? "Updated " + target.Name + "."
-                    : "Get latest failed, so nothing was changed: " + string.Join("; ", failed))
-                + (kept.Count > 0 ? " Kept as they are, because " + target.Name + " changed them since your last sync (commit them first): " + string.Join(", ", kept) + "." : string.Empty));
+            Say(report);
         }
 
         private async void OnCheckout(object sender, RoutedEventArgs e)

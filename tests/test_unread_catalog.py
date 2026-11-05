@@ -21,6 +21,7 @@ from coop_sqlsc.config import Target
 from coop_sqlsc.deploy import table_changes
 from coop_sqlsc.layout import objects_from_files, relative_path
 from coop_sqlsc.objects import ObjectKey
+from coop_sqlsc.sync import SyncRecord
 
 TARGET = Target(name="dev", kind="sql_server", server="", database="Fixture", auth="entra")
 TABLE = ObjectKey("table", "dbo", "T")
@@ -170,6 +171,8 @@ def test_script_and_status_leave_a_held_table_alone(repo):
     assert table_file.read_text() == before, "the index must not be scripted away"
     # The view, read in full, is still compared.
     assert (repo / "database" / "Views" / "dbo.vT.sql").is_file()
+    # The held table's sync record stays for the next healthy read (#77).
+    assert TABLE in SyncRecord.load(repo.path, "dev")
 
 
 def test_a_held_schema_file_is_not_deleted(repo):

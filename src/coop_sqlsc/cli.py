@@ -32,7 +32,7 @@ from . import dependencies as deps_mod
 from . import layout as layout_mod
 from . import migrations as migrations_mod
 from . import sqlproj as sqlproj_mod
-from .catalog import in_scope, platform_schemas, read_database, schema_of
+from .catalog import CatalogResult, in_scope, platform_schemas, read_database, schema_of
 from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
@@ -856,15 +856,15 @@ def run_update(
                     done_before = result.done if result else []
                     result = apply(conn, plan, state.target, closing)
                     result.done = done_before + result.done
-                    after = _in_scope(state.target, read_database(conn, state.target).objects)
-                    tracked = [k for k in state.folder if k.type == "data"]
-                    _read_static_data(conn, state.target, tracked, after)
+                    fresh = _read_catalog(conn, state.target, [k for k in state.folder if k.type == "data"])
+                    state.warnings += _hold_unread(state.target, fresh, state.folder, state.unread, again=True)
+                    after = fresh.objects
                 finally:
                     conn.close()
         except (ConfigError, ConnectError) as exc:
             fail(opts, "connect", str(exc))
             raise
-        remaining = _filter(compare(after, state.folder, state.sync), objects)
+        remaining = _filter(compare(after, state.folder, state.sync, held=set(state.unread)), objects)
         state.sync.save()
     elif not only_script and closing and not blocked and not (result and result.failed):
         # Nothing to change, but a release still goes in the history.
@@ -981,8 +981,9 @@ def _run_before_migrations(opts: Opts, state: State, plan: Plan):
             try:
                 result = apply(conn, plan, state.target)
                 if not result.failed:
-                    state.db = _in_scope(state.target, read_database(conn, state.target).objects)
-                    _read_static_data(conn, state.target, [k for k in state.folder if k.type == "data"], state.db)
+                    fresh = _read_catalog(conn, state.target, [k for k in state.folder if k.type == "data"])
+                    state.warnings += _hold_unread(state.target, fresh, state.folder, state.unread, again=True)
+                    state.db = fresh.objects
                     for key in result.done:
                         state.applied[key.name] = Applied(key.name, datetime.now(timezone.utc), "", "")
             finally:
@@ -1529,9 +1530,11 @@ class State:
     # Objects whose file still carries merge conflict markers: left out of every
     # comparison until the merge is resolved (see _read_state).
     conflicted: set[ObjectKey] = field(default_factory=set)
-    # Objects of a type the database could not be read for completely (#50): left
-    # out of every comparison, so a missing index is never committed as a deletion
-    # or deployed as a DROP. {key: why}; status lists them.
+    # Objects of a type the database could not be read for completely (#50), and
+    # single objects it lists but could not script (#77: no definition; #78: static
+    # data whose table cannot be read as rows): left out of every comparison, so
+    # nothing is committed as a deletion or deployed as a DROP, and their files and
+    # sync records stay as they are. {key: why}; status lists them.
     unread: dict[ObjectKey, str] = field(default_factory=dict)
     push_error: str | None = None
     setup_files: list[str] = field(default_factory=list)  # sqlsc.yml and friends, taken along by a commit
@@ -1565,7 +1568,7 @@ class State:
 
     def changes(self) -> list[Change]:
         """The differences, with the side that moved; also brings the sync record up to date."""
-        changes = compare(self.db, self.folder, self.sync)
+        changes = compare(self.db, self.folder, self.sync, held=set(self.unread))
         self.sync.save()
         return changes
 
@@ -1615,14 +1618,11 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         with spinner:
             conn = open_connection(target)
             try:
-                result = read_database(conn, target)
-                result.objects = _in_scope(target, result.objects)
+                result = _read_catalog(conn, target, [k for k in folder if k.type == "data"])
                 layout_mod.remember_homes(result.objects)  # `schema` layout: a trigger's file is its table's
                 for key in conflicted:
                     result.objects.pop(key, None)
-                result.warnings += _read_static_data(
-                    conn, target, [k for k in folder if k.type == "data"], result.objects
-                )
+                    result.unread_objects.pop(key, None)
                 if files is None and deps_mod.tracked(cfg.scripts_dir):
                     try:
                         dependencies = deps_mod.render(_dependencies(conn, target))
@@ -1648,22 +1648,8 @@ def _read_state(opts: Opts, target_name: str | None, *, files: dict[str, str] | 
         fail(opts, "read", f"Reading {target.label} '{target.name}' failed: {exc}")
         raise
     warnings = list(result.warnings) + warnings
-    # A type the catalog read came back incomplete for is out of the comparison on
-    # both sides (#50): the folder's files of that type would read as deleted from
-    # the database, and script/commit would write that deletion into the repo.
     unread: dict[ObjectKey, str] = {}
-    for obj_type, why in result.unread.items():
-        if obj_type == "table" and not target.caps["tables"]:
-            continue  # not scripted on this platform anyway
-        keys = sorted((k for k in folder if k.type == obj_type), key=lambda k: k.sort_key)
-        for key in keys:
-            unread[key] = why
-            folder.pop(key)
-        label = TYPE_LABELS.get(obj_type, obj_type).lower()
-        warnings.append(
-            f"No {label} was compared: {why}. {len(keys)} {label} file(s) were left out of this run and "
-            "nothing was written for them. Fix the connection or the permission and run again."
-        )
+    warnings += _hold_unread(target, result, folder, unread)
     warnings += [
         f"{path} is in an object folder but its name is not schema.object.sql; it was ignored." for path in unknown
     ]
@@ -1702,6 +1688,63 @@ def _tracks(target: config_mod.Target, key: ObjectKey) -> bool:
 
 def _in_scope(target: config_mod.Target, objects: dict[ObjectKey, str]) -> dict[ObjectKey, str]:
     return {k: v for k, v in objects.items() if in_scope(target, schema_of(k))}
+
+
+def _read_catalog(conn: Any, target: config_mod.Target, data_keys: list[ObjectKey]) -> CatalogResult:
+    """The database's objects in scope, with the static data the repo tracks, and what
+    could not be read (see CatalogResult.unread / unread_objects)."""
+    result = read_database(conn, target)
+    result.objects = _in_scope(target, result.objects)
+    result.unread_objects = {k: v for k, v in result.unread_objects.items() if in_scope(target, schema_of(k))}
+    result.warnings += _read_static_data(conn, target, data_keys, result.objects, unread=result.unread_objects)
+    return result
+
+
+def _hold_unread(
+    target: config_mod.Target,
+    result: CatalogResult,
+    folder: dict[ObjectKey, str],
+    unread: dict[ObjectKey, str],
+    *,
+    again: bool = False,
+) -> list[str]:
+    """Takes what the database could not be read for out of the comparison, on both
+    sides: a file for it would otherwise read as deleted from the database, and
+    script/commit would write that deletion into the repo (#50, #77, #78). Moves the
+    held files' keys from `folder` into `unread`; returns the warnings. `again`: a
+    second read in the same run (after migration scripts or an update), which only
+    reports what was not held already."""
+    warnings: list[str] = []
+    # A type the catalog read came back incomplete for (#50).
+    for obj_type, why in result.unread.items():
+        if obj_type == "table" and not target.caps["tables"]:
+            continue  # not scripted on this platform anyway
+        keys = sorted((k for k in folder if k.type == obj_type), key=lambda k: k.sort_key)
+        for key in keys:
+            unread[key] = why
+            folder.pop(key)
+        if again and not keys:
+            continue
+        label = TYPE_LABELS.get(obj_type, obj_type).lower()
+        warnings.append(
+            f"No {label} was compared: {why}. {len(keys)} {label} file(s) were left out of this run and "
+            "nothing was written for them. Fix the connection or the permission and run again."
+        )
+    # Single objects the database has but did not give sqlsc (#77, #78).
+    for key, why in sorted(result.unread_objects.items(), key=lambda kv: kv[0].sort_key):
+        result.objects.pop(key, None)
+        if key in unread:
+            continue
+        if key in folder:
+            folder.pop(key)
+            unread[key] = why
+            warnings.append(
+                f"{key.display} was not compared: {why}. {relative_path(key)} and its sync record were left as "
+                "they are and nothing was written or applied for it; it is compared again once it can be read."
+            )
+        elif not again:
+            warnings.append(f"{key.display} was not scripted: {why}.")
+    return warnings
 
 
 def _dependencies(conn: Any, target: config_mod.Target) -> list[deps_mod.Dependency]:
@@ -1856,10 +1899,18 @@ def _ignore_sync_dir(root: Path) -> None:
 
 
 def _read_static_data(
-    conn: Any, target: config_mod.Target, keys: list[ObjectKey], into: dict[ObjectKey, str]
+    conn: Any,
+    target: config_mod.Target,
+    keys: list[ObjectKey],
+    into: dict[ObjectKey, str],
+    *,
+    unread: dict[ObjectKey, str] | None = None,
 ) -> list[str]:
     """Scripts the rows of every table the repo tracks static data for. A table
-    missing from the database is simply absent, so get-latest creates and fills it."""
+    missing from the database is simply absent, so get-latest creates and fills it.
+    A table that is there but whose rows cannot be kept as static data (no key now, a
+    column type static data cannot hold) is unread, not absent (#78): it goes into
+    `unread` with the reason, so its file is held rather than read as deleted."""
     warnings: list[str] = []
     for key in sorted(keys):
         try:
@@ -1867,7 +1918,10 @@ def _read_static_data(
         except data_mod.TableMissing:
             continue
         except data_mod.DataError as exc:
-            warnings.append(f"Static data for {key.display} was not read: {exc}")
+            if unread is not None:
+                unread[key] = f"its static data could not be read: {exc}"
+            else:
+                warnings.append(f"Static data for {key.display} was not read: {exc}")
             continue
         into[key] = text
         if count > data_mod.LARGE_TABLE:

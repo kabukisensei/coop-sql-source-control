@@ -173,6 +173,11 @@ class CatalogResult:
     # is in `objects`: a partial table scripted as the whole would later lose its
     # index to a commit, and a deploy would then drop it from a healthy database.
     unread: dict[str, str] = field(default_factory=dict)
+    # Single objects the catalog lists but whose definition did not come back (#77):
+    # a NULL definition (WITH ENCRYPTION, or a login without VIEW DEFINITION on it) or
+    # no definition row at all. The object exists, so it is unknown, not dropped.
+    # {key: why}. None of them is in `objects`.
+    unread_objects: dict[ObjectKey, str] = field(default_factory=dict)
 
 
 def read_database(conn: Any, target: Target) -> CatalogResult:
@@ -217,12 +222,17 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
             module_keys[object_id] = ObjectKey(obj_type, schema, name)
 
     if module_keys:
+        defined: set[int] = set()
         for object_id, definition, ansi_nulls, quoted_identifier in rows(MODULES_SQL, "definitions", required=True):
             key = module_keys.get(object_id)
             if key is None:
                 continue
+            defined.add(object_id)
             if definition is None:
-                result.warnings.append(f"{key.display} is encrypted; its definition cannot be scripted.")
+                result.unread_objects[key] = (
+                    f"{target.label} returned no definition for {key.display} (it is encrypted, or this login "
+                    "cannot see it: VIEW DEFINITION)"
+                )
                 continue
             # sp_rename and ALTER SCHEMA ... TRANSFER leave the stored CREATE naming the old
             # object; scripted as stored, the file would re-create the old name on a deploy.
@@ -235,6 +245,12 @@ def read_database(conn: Any, target: Target) -> CatalogResult:
             result.objects[key] = script_module(
                 definition, ansi_nulls=bool(ansi_nulls), quoted_identifier=bool(quoted_identifier)
             )
+        for object_id, key in module_keys.items():
+            if object_id not in defined:
+                result.unread_objects[key] = (
+                    f"{target.label} lists {key.display} but returned no definition row for it "
+                    "(this login may not be able to see it, or it changed during the read)"
+                )
 
     if tables:
         _read_tables(rows, tables, caps)
