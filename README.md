@@ -217,6 +217,14 @@ off each other's work:
   `--json`. A table scripted without the index it has would otherwise be
   committed as if the index had been dropped, and a later `get-latest` on a
   healthy database would drop it. Fix the access and run again.
+- **An object the database has but cannot give sqlsc** is held the same way:
+  a view, procedure, function or trigger whose definition comes back empty
+  (`WITH ENCRYPTION`, or a login without `VIEW DEFINITION` on it), and a
+  tracked static-data table that is still there but whose rows cannot be read
+  as static data (it lost its primary key, or gained a `geometry` column). Its
+  file, HEAD and its sync record stay as they are, it is listed under `unread`,
+  and it is compared again once it can be read. A dropped object or table is
+  still a deletion; `sqlsc data remove` still stops tracking a table's rows.
 - **A file name that does not fit.** SQL Server allows 128 characters for a
   schema and 128 for a name, and a file system allows 255 for a file name, so
   `script` and `commit` check every file name first and refuse with

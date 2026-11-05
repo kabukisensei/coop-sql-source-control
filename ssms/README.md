@@ -28,7 +28,11 @@ coop-agent and CI always agree.
   repo moved, and Get latest what it kept because the database did (see
   *Working as a team* in the main README for every rule). When the repo has migration scripts the
   database has not run, the status line says so and Get latest's question
-  names them.
+  names them. When Get latest fails, the status line says what that left on the
+  database: everything rolled back, or what stays applied (the steps a target
+  without transactions ran before the failure, "before" migration scripts that
+  committed ahead of it) and what was not applied; when sqlsc gave no answer
+  (cancelled, stopped), it says the outcome is not known and to Refresh first.
   Check out and Check in are optional: a team can work with Commit and Get
   latest alone (see *Checkout and check-in* in the main README).
 - **Checkouts**: everything checked out in this repo. **Check in** commits and

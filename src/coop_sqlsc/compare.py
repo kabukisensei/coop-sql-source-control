@@ -69,10 +69,17 @@ class Change:
         )
 
 
-def compare(db: dict[ObjectKey, str], folder: dict[ObjectKey, str], sync: SyncRecord | None = None) -> list[Change]:
+def compare(
+    db: dict[ObjectKey, str],
+    folder: dict[ObjectKey, str],
+    sync: SyncRecord | None = None,
+    held: frozenset[ObjectKey] | set[ObjectKey] = frozenset(),
+) -> list[Change]:
     """The differences, each marked with the side that moved when `sync` can tell.
     Objects that match on both sides are recorded in `sync` as the last synced text,
-    and objects gone from both sides are forgotten; the caller saves it."""
+    and objects gone from both sides are forgotten; the caller saves it. `held` are
+    objects left out of this comparison because they could not be read (#77): their
+    record stays, so a later healthy read still knows which side moved."""
     changes: list[Change] = []
     for key in db.keys() | folder.keys():
         in_db, in_folder = key in db, key in folder
@@ -94,7 +101,7 @@ def compare(db: dict[ObjectKey, str], folder: dict[ObjectKey, str], sync: SyncRe
             origin = sync.origin(key, db_c, file_c)
         changes.append(Change(key, action, db_text, file_text, origin))
     if sync is not None:
-        for key in [k for k in sync.hashes if k not in db and k not in folder]:
+        for key in [k for k in sync.hashes if k not in db and k not in folder and k not in held]:
             sync.forget(key)
     changes.sort(key=lambda c: c.key.sort_key)
     return changes
