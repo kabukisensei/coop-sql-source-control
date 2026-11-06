@@ -224,7 +224,18 @@ def run(tmp_path: Path, *args: str):
 
 
 def test_cli_init_status_script_round_trip(tmp_path, fake_db):
-    result = run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    result = run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     assert result.exit_code == 0, result.output
     assert (tmp_path / ".gitattributes").read_text() == "*.sql text diff\n"
 
@@ -250,7 +261,18 @@ def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "dev@example.com")
     _git(tmp_path, "config", "user.name", "Dev")
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     view = ObjectKey("view", "dbo", "vSales")
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     assert run(tmp_path, "script").exit_code == 0
@@ -289,7 +311,18 @@ def test_a_failed_push_keeps_the_commit_and_says_so(tmp_path, fake_db):
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "dev@example.com")
     _git(tmp_path, "config", "user.name", "Dev")
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     result = run(tmp_path, "--json", "commit", "--push", "-m", "Script")
     assert result.exit_code == 0, result.output
@@ -665,7 +698,18 @@ def test_commit_leaves_a_teammates_unapplied_object_alone(tmp_path, fake_db):
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "dev@example.com")
     _git(tmp_path, "config", "user.name", "Dev")
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     assert ".sqlsc/" in (tmp_path / ".gitignore").read_text()
     view, proc = ObjectKey("view", "dbo", "vSales"), ObjectKey("procedure", "dbo", "usp_New")
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
@@ -696,7 +740,18 @@ def test_commit_leaves_a_teammates_unapplied_object_alone(tmp_path, fake_db):
 
 
 def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypatch):
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     view = ObjectKey("view", "dbo", "vSales")
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     assert run(tmp_path, "script").exit_code == 0  # synced
@@ -713,7 +768,18 @@ def test_get_latest_keeps_uncommitted_database_work(tmp_path, fake_db, monkeypat
 
 def test_a_failed_update_reads_cleanly(tmp_path, fake_db, monkeypatch):
     # SQL Server's messages end with a period; the CLI added another ("conditions.. Every").
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     (tmp_path / "database" / "Views").mkdir(parents=True)
     (tmp_path / "database" / "Views" / "dbo.vNew.sql").write_text("CREATE VIEW dbo.vNew AS SELECT 1;\nGO\n")
 
@@ -745,7 +811,18 @@ def test_status_says_who_you_are_and_which_checkouts_are_yours(tmp_path, fake_db
 
     from coop_sqlsc.locks import Lock
 
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     view = ObjectKey("view", "dbo", "vSales")
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     lock = Lock("repo", view, "Ada@Example.com", "ada", datetime(2026, 10, 19, 12, 0), None)
@@ -806,7 +883,18 @@ def _fake_migration_store(monkeypatch, applied: dict):
 def test_status_text_lists_changes_and_pending_migrations_together(tmp_path, fake_db, monkeypatch):
     # Found live: with a migration pending, text status hid the object changes, and with
     # nothing to report it printed "matches" and then an empty "0 new, 0 changed" table.
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     _fake_migration_store(monkeypatch, {})
     quiet = run(tmp_path, "status").output
     assert "The repo matches" in quiet and "0 new" not in quiet
@@ -826,7 +914,18 @@ def test_status_text_lists_changes_and_pending_migrations_together(tmp_path, fak
 
 
 def test_get_latest_runs_pending_migrations_around_the_structural_changes(tmp_path, fake_db, monkeypatch):
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     folder = tmp_path / "database"
     (folder / "Views").mkdir(parents=True)
     (folder / "Views" / "dbo.vSales.sql").write_text("CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n")
@@ -875,7 +974,18 @@ def test_commit_takes_new_migration_scripts_along(tmp_path, fake_db, monkeypatch
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "dev@example.com")
     _git(tmp_path, "config", "user.name", "Dev")
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     _fake_migration_store(monkeypatch, {})
     added = json.loads(run(tmp_path, "--json", "migrations", "add", "backfill region").output)
     assert added["path"].endswith("_backfill-region.sql")
@@ -895,7 +1005,18 @@ def test_status_lists_files_that_still_need_committing(tmp_path, fake_db, monkey
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "dev@example.com")
     _git(tmp_path, "config", "user.name", "Dev")
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     assert run(tmp_path, "script").exit_code == 0  # written, not committed
 
@@ -917,7 +1038,18 @@ def test_a_deploy_with_nothing_to_change_still_records_the_release(tmp_path, fak
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "dev@example.com")
     _git(tmp_path, "config", "user.name", "Dev")
-    run(tmp_path, "init", "--kind", "azure_sql", "--server", "s.database.windows.net", "--database", "Sales")
+    run(
+        tmp_path,
+        "init",
+        "--layout",
+        "type",
+        "--kind",
+        "azure_sql",
+        "--server",
+        "s.database.windows.net",
+        "--database",
+        "Sales",
+    )
     fake_db[ObjectKey("view", "dbo", "vSales")] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     assert run(tmp_path, "script").exit_code == 0
     _git(tmp_path, "add", "-A")
@@ -987,7 +1119,12 @@ def test_a_schema_list_that_is_not_names_says_how_to_write_it(tmp_path):
 
 
 def test_left_out_schemas_are_not_scripted_compared_or_deleted(tmp_path, fake_db):
-    assert run(tmp_path, "init", "--kind", "azure_sql", "--server", "s", "--database", "Sales").exit_code == 0
+    assert (
+        run(
+            tmp_path, "init", "--layout", "type", "--kind", "azure_sql", "--server", "s", "--database", "Sales"
+        ).exit_code
+        == 0
+    )
     with (tmp_path / "sqlsc.yml").open("a") as handle:
         handle.write("exclude_schemas: [staging]\n")
     fake_db[ObjectKey("schema", "", "staging")] = "CREATE SCHEMA [staging];\nGO\n"
@@ -1022,6 +1159,8 @@ def test_init_writes_the_schema_filter_and_says_so(tmp_path):
         tmp_path,
         "--json",
         "init",
+        "--layout",
+        "type",
         "--kind",
         "azure_sql",
         "--server",
@@ -1041,7 +1180,20 @@ def test_init_writes_the_schema_filter_and_says_so(tmp_path):
     dev = load(tmp_path).target()
     assert dev.keeps_schema("finance") and not dev.keeps_schema("dbo") and not dev.keeps_schema("staging")
     plain = json.loads(
-        run(tmp_path, "--json", "init", "--force", "--kind", "azure_sql", "--server", "s", "--database", "Sales").output
+        run(
+            tmp_path,
+            "--json",
+            "init",
+            "--force",
+            "--layout",
+            "type",
+            "--kind",
+            "azure_sql",
+            "--server",
+            "s",
+            "--database",
+            "Sales",
+        ).output
     )
     assert set(plain) == {"ok", "command", "config", "folder", "layout", "target"}
 

@@ -148,7 +148,7 @@ def repo(tmp_path, monkeypatch):
         "read_database",
         lambda conn, target: catalog.read_database(fake_connection(fixture.rows, fixture.failing), target),
     )
-    run(tmp_path, "init", "--kind", "sql_server", "--server", "s", "--database", "Fixture")
+    run(tmp_path, "init", "--layout", "type", "--kind", "sql_server", "--server", "s", "--database", "Fixture")
     assert run(tmp_path, "script").exit_code == 0
     table_file = tmp_path / "database" / "Tables" / "dbo.T.sql"
     assert "IX_T" in table_file.read_text()

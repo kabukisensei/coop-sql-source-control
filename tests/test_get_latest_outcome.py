@@ -86,7 +86,7 @@ def setup(tmp_path, monkeypatch, kind: str) -> list[str]:
     monkeypatch.setattr(
         cli_mod, "read_database", lambda conn, target: catalog.read_database(fake_catalog(EMPTY), target)
     )
-    result = run(tmp_path, "init", "--kind", kind, "--server", "s", "--database", "Fixture")
+    result = run(tmp_path, "init", "--layout", "type", "--kind", kind, "--server", "s", "--database", "Fixture")
     assert result.exit_code == 0, result.output
     views = tmp_path / "database" / "Views"
     views.mkdir(parents=True)

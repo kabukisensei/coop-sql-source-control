@@ -61,7 +61,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 
 | Command | What it does |
 | --- | --- |
-| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*); `--layout type\|schema` picks the file layout (see *Repo layout*; default: what the folder already holds); `--sqlproj` also writes the SQL project (see *Compile check*) |
+| `sqlsc init` | Links the repo to a database by writing `sqlsc.yml`; `--schema NAME` and `--exclude-schema NAME` (each repeatable) write the schema filter (see *Schemas*); `--layout schema\|type` picks the file layout (see *Repo layout*; default: what the folder already holds, `schema` for an empty one); `--sqlproj` also writes the SQL project (see *Compile check*) |
 | `sqlsc sqlproj` | Writes a SQL project over the scripts folder so `dotnet build` compiles the repo (see *Compile check*); `--name`, `--force` |
 | `sqlsc targets` | Lists the databases the repo can talk to |
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, plus object files written but not committed yet (from `script`, `data add` or an applied edit), which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
@@ -104,8 +104,8 @@ environment variable) overrides it, for an agent or a shared machine.
 
 ```yaml
 folder: database          # object scripts, relative to this file
-layout: type              # optional: type (Tables/dbo.Customer.sql, the default) or
-                          # schema (dbo/Tables/Customer.sql, what SSMS writes); see Repo layout
+layout: schema            # schema (dbo/Tables/Customer.sql, what SSMS writes; init's default)
+                          # or type (Tables/dbo.Customer.sql); see Repo layout
 target: dev               # used when a command names none
 targets:
   dev:
@@ -500,8 +500,8 @@ The script runs first, the database is read again, and the compare then sees
 
 ## Repo layout
 
-Two layouts, one per repo. `type` is the default, the shape Redgate SQL Source
-Control uses:
+Two layouts, one per repo. `type` is the older shape, the one Redgate SQL Source
+Control uses (sqlsc's default before 1.0.16):
 
 ```
 database/
@@ -538,10 +538,14 @@ last batches of its table's file, and `status` shows the table's path for it. Dr
 the trigger takes its batches out; dropping the table takes the file. `DatabaseTriggers/`
 and `UserDefinedTypes/` hold objects sqlsc does not script and are left alone.
 
-`layout: schema` in `sqlsc.yml` (or `sqlsc init --layout schema`) chooses it. With
-no key, the files decide: a folder that already holds `dbo/Tables/Customer.sql`
-reads as `schema`, one with `Tables/dbo.Customer.sql` as `type`, an empty one as
-`type`. `status` reports the layout in use. Files in the other layout are never
+`schema` is the default for a new repo: `sqlsc init` writes `layout: schema` into
+`sqlsc.yml` when the scripts folder is empty, so a repo sqlsc starts and one SSMS
+starts have the same shape; `sqlsc init --layout type` picks the other. A folder
+that already holds object files keeps their layout, whichever was asked for (`init`
+writes the key it found, and refuses `--layout` for the other one). With no key at all
+(a `sqlsc.yml` from before 1.0.16), the files decide: a folder that holds
+`dbo/Tables/Customer.sql` reads as `schema`, one with `Tables/dbo.Customer.sql` as
+`type`, an empty one as `type`. `status` reports the layout in use. Files in the other layout are never
 read: `status` warns about them, and `script`, `commit`, `checkin`, `get-latest`
 and `deploy` stop with `"error": {"kind": "layout"}` before writing anything,
 because an object only such a file holds would otherwise count as missing from the
@@ -662,6 +666,6 @@ column type, and releases by tag to a protected target.
 5. **SSMS add-in**: a window in SSMS 21/22 over the same CLI; see [ssms/README.md](ssms/README.md).
 6. **Migration scripts**: hand-written, run-once scripts around the structural changes.
 7. **Compile check and the agent's mark** (1.0.8): a SQL project for `dotnet build`, `Prepared-by:` trailers, the drift pipeline.
-8. **Living with SSMS's Database DevOps** (1.0.9 to 1.0.12): the `schema` layout SSMS and SqlPackage write (triggers in the table's file, `StoredProcedures`), a project SSMS opens, BOMs kept, and table files in DacFx's own shape, written and read; the SQL project keeps a schema named Data or Migrations in the build.
+8. **Living with SSMS's Database DevOps** (1.0.9 to 1.0.12): the `schema` layout SSMS and SqlPackage write (triggers in the table's file, `StoredProcedures`), a project SSMS opens, BOMs kept, and table files in DacFx's own shape, written and read; the SQL project keeps a schema named Data or Migrations in the build. Since 1.0.16 `init` gives a new repo that layout by default.
 
 Design notes: [SQL Source Control design proposal](https://claude.ai/code/artifact/b6a4d639-6a01-40a7-a64f-cb97231ce159).

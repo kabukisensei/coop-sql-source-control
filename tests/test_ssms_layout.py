@@ -95,7 +95,7 @@ def test_sql_files_lists_the_tree_and_read_folder_still_ignores_the_other_shape(
 def test_status_warns_and_script_commit_get_latest_refuse_on_a_mixed_folder(tmp_path, fake_db):  # noqa: F811
     # A `type` repo (it already holds Tables/dbo.Customer.sql) into which someone saved an
     # SSMS-shaped file: that file is not read, status says so, and nothing writes.
-    _init(tmp_path)
+    _init(tmp_path, "--layout", "type")
     write_object(tmp_path / "database", TABLE, TABLE_TEXT)
     fake_db[TABLE] = TABLE_TEXT
     fake_db[VIEW] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
@@ -201,6 +201,27 @@ def test_init_layout_schema_writes_the_key_and_the_files_follow(tmp_path, fake_d
     assert "Views/dbo.vOld.sql" in refused["error"]["message"] and "`type` layout" in refused["error"]["message"]
 
 
+def test_init_on_an_empty_folder_defaults_to_the_schema_layout(tmp_path, fake_db):  # noqa: F811
+    # A new repo takes the layout SSMS, SqlPackage and Fabric write (2026-11-05), and the
+    # key is written so the choice is on record; `--layout type` still picks the old shape.
+    done = _init(tmp_path)
+    assert done["layout"] == "schema"
+    assert "layout: schema" in (tmp_path / "sqlsc.yml").read_text(encoding="utf-8")
+    fake_db[TABLE] = TABLE_TEXT
+    scripted = json.loads(run(tmp_path, "script").output)
+    assert scripted["ok"], scripted
+    assert (tmp_path / "database" / "dbo" / "Tables" / "Customer.sql").exists()
+    again = run(
+        tmp_path, "init", "--force", "--layout", "type", "--kind", "azure_sql", "--server", "s", "--database", "Sales"
+    )
+    assert again.exit_code == 2 and json.loads(again.output)["error"]["kind"] == "layout"  # files already decide
+    other = tmp_path / "other"
+    other.mkdir()
+    typed = run(other, "init", "--layout", "type", "--kind", "azure_sql", "--server", "s", "--database", "Sales")
+    assert typed.exit_code == 0 and json.loads(typed.output)["layout"] == "type"
+    assert "layout: type" in (other / "sqlsc.yml").read_text(encoding="utf-8")
+
+
 def test_a_folder_ssms_filled_is_recognised_without_the_key(tmp_path, fake_db):  # noqa: F811
     # `sqlsc init` run at the repo root over a project SSMS created: no --layout needed.
     project = tmp_path / "Sales"
@@ -211,7 +232,7 @@ def test_a_folder_ssms_filled_is_recognised_without_the_key(tmp_path, fake_db): 
     (project / "Sales.sqlproj").write_text('<Project Sdk="Microsoft.Build.Sql/2.3.0" />\n')
     done = _init(tmp_path, "--folder", "Sales")
     assert done["layout"] == "schema"
-    assert "layout:" not in (tmp_path / "sqlsc.yml").read_text(encoding="utf-8")  # the files say it
+    assert "layout: schema" in (tmp_path / "sqlsc.yml").read_text(encoding="utf-8")  # on record
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "SSMS project")
     fake_db[TABLE] = TABLE_TEXT

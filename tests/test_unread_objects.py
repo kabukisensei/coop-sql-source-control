@@ -189,7 +189,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli_mod, "read_database", lambda conn, target: catalog.read_database(fake_connection(fixture.rows), target)
     )
-    run(tmp_path, "init", "--kind", "sql_server", "--server", "s", "--database", "Fixture")
+    run(tmp_path, "init", "--layout", "type", "--kind", "sql_server", "--server", "s", "--database", "Fixture")
     # Track dbo.T's rows: the Data file is the switch.
     columns, key_columns = data.track_columns(Conn(), DATA)
     text = data.render(DATA, columns, key_columns, [("1",), ("2",)])
