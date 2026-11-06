@@ -96,7 +96,9 @@ def repo(tmp_path, monkeypatch):
     git(tmp_path, "init", "-q")
     git(tmp_path, "config", "user.email", "dev@example.com")
     git(tmp_path, "config", "user.name", "Dev")
-    result = run(tmp_path, "init", "--kind", "sql_server", "--server", "fixture", "--database", "fixture")
+    result = run(
+        tmp_path, "init", "--layout", "type", "--kind", "sql_server", "--server", "fixture", "--database", "fixture"
+    )
     assert result.exit_code == 0, result.output
     return tmp_path, objects, conn
 

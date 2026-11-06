@@ -26,9 +26,10 @@ coop-agent calls standalone tools by shelling out and reading JSON, the way its
   the repo without a shell `git commit`.
 - `schemas` / `exclude_schemas` in `sqlsc.yml` (written by `init --schema` /
   `--exclude-schema`) narrow every command to part of the database.
-- `layout` in `sqlsc.yml` (written by `init --layout`) is `type` (sqlsc's own
-  `Tables/dbo.Customer.sql`) or `schema` (`dbo/Tables/Customer.sql`, what SSMS's
-  Create Project from Database writes); with no key the files decide. Every answer's
+- `layout` in `sqlsc.yml` (written by every `init` since 1.0.16) is `schema`
+  (`dbo/Tables/Customer.sql`, what SSMS's Create Project from Database writes; the
+  default for an empty folder) or `type` (sqlsc's older `Tables/dbo.Customer.sql`);
+  a folder that already holds files keeps their layout, and with no key the files decide. Every answer's
   header carries `layout`. Files in the other layout make `status` warn and every
   writing command refuse with `"error": {"kind": "layout"}` before touching anything,
   so an agent should pass the warning on rather than script around it.

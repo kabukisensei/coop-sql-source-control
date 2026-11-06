@@ -145,8 +145,8 @@ def main(ctx: click.Context, as_json: bool, config_path: Path | None) -> None:
 @click.option(
     "--layout",
     type=click.Choice(list(layout_mod.LAYOUTS)),
-    help="How files are laid out: type (Tables/dbo.Customer.sql, the default) or schema "
-    "(dbo/Tables/Customer.sql, what SSMS and SqlPackage write). Default: what the folder already holds.",
+    help="How files are laid out: schema (dbo/Tables/Customer.sql, what SSMS and SqlPackage write; "
+    "the default for a new repo) or type (Tables/dbo.Customer.sql). Default: what the folder already holds.",
 )
 @click.option("--force", is_flag=True, help="Overwrite an existing sqlsc.yml.")
 @click.option("--sqlproj", "with_sqlproj", is_flag=True, help="Also write a SQL project for a compile check.")
@@ -190,8 +190,10 @@ def init(
                 "(or run this inside a repo that has coop's .coop/project.yml).",
             )
     filters = {k: list(v) for k, v in (("schemas", schemas), ("exclude_schemas", exclude_schemas)) if v}
-    # The layout is written only when asked for: a `type` repo needs no key, and a folder
-    # SSMS already filled is recognised by its files (Config.resolved_layout).
+    # A folder that already holds object files keeps their layout; an empty one gets the
+    # `schema` layout SSMS, SqlPackage and Fabric write (Aaron, 2026-11-05), so a repo
+    # sqlsc starts and one SSMS starts look the same. The key is always written, so the
+    # choice is on record and a later reader never has to guess from the files.
     found = layout_mod.detect_layout(layout_mod.sql_files(path.parent / folder))
     if layout and found and found != layout:
         fail(
@@ -199,10 +201,9 @@ def init(
             "layout",
             f"{folder} already holds files in the `{found}` layout; `--layout {layout}` would not read them.",
         )
-    config_mod.write_new(
-        path, folder=folder, target=target_name, target_entry=entry, filters=filters, layout=layout or ""
-    )
-    use_layout(layout or found or layout_mod.TYPE_LAYOUT)
+    chosen = layout or found or layout_mod.SCHEMA_LAYOUT
+    config_mod.write_new(path, folder=folder, target=target_name, target_entry=entry, filters=filters, layout=chosen)
+    use_layout(chosen)
     attributes = path.parent / ".gitattributes"
     if not attributes.exists():
         attributes.write_text("*.sql text diff\n", encoding="utf-8")
