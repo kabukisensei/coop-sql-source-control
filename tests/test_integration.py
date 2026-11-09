@@ -187,3 +187,32 @@ def test_a_release_that_cannot_be_recorded_changes_nothing(tmp_path, server, mak
     text = conn.cursor().execute("SELECT OBJECT_DEFINITION(OBJECT_ID('dbo.v'))").fetchone()[0]
     conn.close()
     assert "SELECT 1 AS n" in text
+
+
+VIEW_ON_FUNCTION = """
+CREATE SCHEMA sales;
+GO
+CREATE TABLE dbo.Customer (CustomerId int NOT NULL PRIMARY KEY);
+GO
+CREATE FUNCTION dbo.fn_OrderTotal(@id int) RETURNS int AS BEGIN RETURN @id * 2 END;
+GO
+CREATE VIEW sales.v_CustomerTotals AS
+SELECT c.CustomerId, dbo.fn_OrderTotal(c.CustomerId) AS Total FROM dbo.Customer AS c;
+GO
+"""
+
+
+def test_a_first_release_creates_the_function_a_view_calls_first(tmp_path, server, make_db):
+    """Dev VM check 2026-11-09: the view was created before the function and all rolled back."""
+    source = make_db(VIEW_ON_FUNCTION)
+    config = link(tmp_path, server, source)
+    sqlsc(config, "script")
+
+    copy_dir = tmp_path / "copy"
+    copy_dir.mkdir()
+    config_copy = link(copy_dir, server, make_db())
+    (copy_dir / "database").symlink_to(tmp_path / "database", target_is_directory=True)
+
+    result = sqlsc(config_copy, "get-latest")
+    assert result["ok"], result
+    assert result["failed"] == [] and result["still_different"] == []

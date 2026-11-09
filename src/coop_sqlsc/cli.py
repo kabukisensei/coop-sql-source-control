@@ -33,7 +33,18 @@ from . import layout as layout_mod
 from . import migrations as migrations_mod
 from . import sqlproj as sqlproj_mod
 from .catalog import CatalogResult, in_scope, platform_schemas, read_database, schema_of
-from .compare import CHANGED, DELETED, NEW, ORIGIN_WORDS, Change, comparable, compare, matches, summarize
+from .compare import (
+    CHANGED,
+    DELETED,
+    NEW,
+    ORIGIN_WORDS,
+    UNCOMMITTED_WORD,
+    Change,
+    comparable,
+    compare,
+    matches,
+    summarize,
+)
 from .config import KINDS, ConfigError
 from .connect import ConnectError, open_connection
 from .deploy import GUARDED_KINDS, Plan, apply, build_plan, migration_steps
@@ -208,6 +219,7 @@ def init(
     if not attributes.exists():
         attributes.write_text("*.sql text diff\n", encoding="utf-8")
     _ignore_sync_dir(path.parent)
+    sqlproj_mod.write_editorconfig(path.parent / folder)
     project = None
     if with_sqlproj:
         project, _ = _write_sqlproj(opts, config_mod.load(config_path=path), target_name, force=force)
@@ -269,6 +281,7 @@ def _write_sqlproj(
     except git_ops.GitError:
         root = cfg.root
     ignored = sqlproj_mod.ignore_build_output(root)
+    sqlproj_mod.write_editorconfig(cfg.scripts_dir)
     rel = path.relative_to(cfg.root).as_posix()
     details = {
         "path": rel,
@@ -387,7 +400,8 @@ def status(opts: Opts, target_name: str | None, exit_code: bool, as_user: str | 
             _print_changes(changes, held, who)
             console.print()
             console.print(
-                f"{counts[NEW]} new, {counts[CHANGED]} changed, {counts[DELETED]} deleted: " + _sides_text(sides)
+                f"{counts[NEW]} new, {counts[CHANGED]} changed, {counts[DELETED]} deleted: "
+                + _sides_text(sides, sum(1 for c in changes if c.uncommitted))
             )
             console.print("Run [bold]sqlsc diff <object>[/] to see one.")
         if pending:
@@ -420,6 +434,8 @@ def diff(opts: Opts, objects: tuple[str, ...], target_name: str | None, context:
         return
     if not changes:
         console.print("[green]✓[/] No differences" + (f" for {', '.join(objects)}." if objects else "."))
+        for change in _filter(_uncommitted(state, set()), objects):
+            console.print(f"  {escape(change.key.display)}: {_side_note(change)} ([bold]sqlsc commit[/]).")
         return
     for change, item in zip(changes, items, strict=True):
         style = ACTION_STYLE[change.action]
@@ -515,6 +531,8 @@ def commit(
     """
     git_info = _ready_to_commit(opts, _load_config(opts), pull=not no_pull)
     state = _read_state(opts, target_name)
+    if git_info.get("identity_warning"):
+        state.warnings.append(git_info["identity_warning"])
     _refuse_other_layout(opts, state)
     differences = state.changes()
     pending = _uncommitted(state, {c.key for c in differences})
@@ -612,6 +630,7 @@ def _ready_to_commit(opts: Opts, cfg: config_mod.Config, *, pull: bool) -> dict[
         pulled_files = [rel for rel in _under(cfg.scripts_dir, root, paths)]
         return {
             **repo.to_json(),
+            "identity_warning": repo.mixed_identity(),
             "pulled": pulled,
             "pulled_files": pulled_files,
             "behind": max(repo.behind - pulled, 0),
@@ -1123,6 +1142,8 @@ def checkin(
         agents = _prepared_by(prepared_by, [git_ops.agent_of(as_user), *map(git_ops.agent_of, for_me)])
         if keys and not no_commit:
             state = _read_state(opts, target.name)
+            if git_info.get("identity_warning"):
+                state.warnings.append(git_info["identity_warning"])
             _refuse_other_layout(opts, state)
             wanted = set(keys)
             differences = state.changes()
@@ -1836,10 +1857,18 @@ def _sides(changes: list[Change]) -> dict[str, int]:
     }
 
 
-def _sides_text(sides: dict[str, int]) -> str:
+def _sides_text(sides: dict[str, int], files: int = 0) -> str:
+    """The status summary; `files` of the ones to commit are files the database already matches."""
     parts = []
     if sides["to_commit"]:
-        parts.append(f"{sides['to_commit']} to commit ([bold]sqlsc commit[/])")
+        only_files = (
+            ""
+            if not files
+            else " (the database already matches; the files are not committed yet)"
+            if files == sides["to_commit"]
+            else f" ({files} of them files the database already matches, not committed yet)"
+        )
+        parts.append(f"{sides['to_commit']} to commit ([bold]sqlsc commit[/]){only_files}")
     if sides["to_get"]:
         parts.append(f"{sides['to_get']} to get ([bold]sqlsc get-latest[/])")
     if sides["conflicts"]:
@@ -1850,6 +1879,8 @@ def _sides_text(sides: dict[str, int]) -> str:
 
 
 def _side_note(change: Change) -> str:
+    if change.uncommitted:
+        return "the database already matches the file; the file is not committed to git yet"
     if change.origin == DATABASE:
         return "dropped from the database" if change.action == DELETED else "changed in the database"
     if change.origin == REPO:
@@ -1973,8 +2004,9 @@ def _dependencies_pending(state: State) -> bool:
         return False
 
 
-# The files `init` writes beside sqlsc.yml. Commit takes them along while they are new or
-# changed, so the repo's first commit links it to the database and keeps .sqlsc/ out of git.
+# The files `init` writes beside sqlsc.yml (and the scripts folder's .editorconfig, see
+# _uncommitted_setup). Commit takes them along while they are new or changed, so the repo's
+# first commit links it to the database and keeps .sqlsc/ out of git.
 SETUP_FILES = (config_mod.CONFIG_NAME, ".gitattributes", ".gitignore")
 
 
@@ -1984,7 +2016,17 @@ def _uncommitted_setup(state: State) -> list[str]:
         dirty = git_ops.uncommitted(root, state.config.root)
     except git_ops.GitError:
         return []
-    return [name for name in SETUP_FILES if name in dirty]
+    names = [*SETUP_FILES, _editorconfig_rel(state.config)]
+    return [name for name in names if name in dirty]
+
+
+def _editorconfig_rel(cfg: config_mod.Config) -> str:
+    """The scripts folder's .editorconfig, relative to sqlsc.yml's folder."""
+    path = cfg.scripts_dir / sqlproj_mod.EDITORCONFIG_NAME
+    try:
+        return path.resolve().relative_to(cfg.root.resolve()).as_posix()
+    except ValueError:
+        return sqlproj_mod.EDITORCONFIG_NAME
 
 
 def _uncommitted_migrations(state: State) -> list[str]:
@@ -2017,10 +2059,10 @@ def _uncommitted(state: State, differing: set[ObjectKey]) -> list[Change]:
             if key in differing or not _tracks(state.target, key):
                 continue  # an out-of-scope object, even a deleted one, stays as git has it
             if how == "deleted":
-                found.append(Change(key, DELETED, None, None, DATABASE))
+                found.append(Change(key, DELETED, None, None, DATABASE, uncommitted=True))
             elif key in state.folder:
                 text = state.folder[key]
-                found.append(Change(key, NEW if how == "added" else CHANGED, text, text, DATABASE))
+                found.append(Change(key, NEW if how == "added" else CHANGED, text, text, DATABASE, uncommitted=True))
             else:
                 continue
             state.uncommitted.add(key)
@@ -2121,7 +2163,7 @@ def _print_changes(changes: list[Change], held: dict[ObjectKey, Lock] | None = N
         style = ACTION_STYLE[change.action]
         cells = [f"[{style}]{ACTION_WORDS[change.action]}[/]", TYPE_LABELS[change.key.type], escape(change.key.display)]
         if show_sides:
-            word = ORIGIN_WORDS[change.origin]
+            word = UNCOMMITTED_WORD if change.uncommitted else ORIGIN_WORDS[change.origin]
             cells.append(f"[red]{word}[/]" if change.origin == BOTH else word)
         if show_locks:
             lock = held.get(change.key)

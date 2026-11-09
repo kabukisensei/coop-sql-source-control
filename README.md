@@ -53,8 +53,11 @@ git pull                          # a teammate's changes arrive as files
 sqlsc get-latest                  # apply them to your dev database
 ```
 
-`init` writes `sqlsc.yml` at the repo root and a `.gitattributes` for the
-scripts; the first `commit` commits them (and `.gitignore`) with the objects. Inside a repo that has coop's `.coop/project.yml`, `sqlsc init` with no
+`init` writes `sqlsc.yml` at the repo root, a `.gitattributes` for the
+scripts and an `.editorconfig` in the scripts folder (so SSMS and Visual Studio
+save `.sql` files without a byte order mark, as sqlsc writes them, and a first
+save is not a change in git); the first `commit` commits them (and `.gitignore`)
+with the objects. Inside a repo that has coop's `.coop/project.yml`, `sqlsc init` with no
 options uses the contract's `sql_targets` (dev, test, prod) as they are.
 
 ## Commands
@@ -67,7 +70,7 @@ options uses the contract's `sql_targets` (dev, test, prod) as they are.
 | `sqlsc status` | Lists objects that are new, changed or deleted in the database compared with the repo, plus object files written but not committed yet (from `script`, `data add` or an applied edit), which side changed (see *Which side changed*) and who has each checked out (`mine` in `--json`); `--exit-code` exits 1 when anything differs |
 | `sqlsc diff [objects…]` | Shows the text differences, for everything or the objects named (`dbo.Customer`, `Customer`) |
 | `sqlsc script [objects…]` | Writes new and changed objects into the repo and removes files for dropped ones; `--dry-run` shows what it would do |
-| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes` and `.gitignore` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch; `--prepared-by TEXT` (or an `<agent>:<person>` `--as` name) adds a `Prepared-by:` trailer naming the agent that prepared the change (see *Who prepared a change*). It fast-forwards the branch onto its upstream first and stops on a detached HEAD, a merge in progress, unresolved conflicts or a missing git identity (see *Working as a team*); `--no-pull` skips the pull |
+| `sqlsc commit [objects…] -m "…"` | Does what `script` does, then commits exactly those files (nothing else you have staged), plus object files that already match the database but are not committed yet (from `script`, `data add`, or an edit applied with `get-latest`) and `sqlsc.yml`, `.gitattributes`, `.gitignore` and the scripts folder's `.editorconfig` while they are new or changed; objects the repo changed since your last sync are left for `get-latest` unless `--force`; `--push` pushes the branch; `--prepared-by TEXT` (or an `<agent>:<person>` `--as` name) adds a `Prepared-by:` trailer naming the agent that prepared the change (see *Who prepared a change*). It fast-forwards the branch onto its upstream first and stops on a detached HEAD, a merge in progress, unresolved conflicts or a missing git identity (see *Working as a team*); `--no-pull` skips the pull |
 | `sqlsc get-latest [objects…]` | Changes the database to match the repo, running any migration scripts it has not had yet; `--dry-run` prints the script, `--output FILE` saves it without running it, `--allow-drops` also drops objects and columns the repo no longer has, `--force` also overwrites objects changed in the database since your last sync |
 | `sqlsc checkout objects… [-m note]` | Checks objects out to you; `--type view` checks out one you are about to create |
 | `sqlsc checkin [objects…] [-m "…"]` | Commits your checked-out objects (all of them when none are named) and releases them, pulling first like `commit` (`--no-pull` skips that); `--no-commit` only releases them; a checkout an agent took for you gives the commit a `Prepared-by:` trailer |
@@ -177,7 +180,10 @@ leaves Repo and Both objects alone,
 and `get-latest` leaves Database and Both objects alone, each saying why; in
 `--json` they are listed under `held_back` and `kept`. An object never seen in
 sync (a fresh clone, or a difference older than the record) has no side, and
-both commands treat it the way they always did.
+both commands treat it the way they always did. A file you edited and applied
+with `get-latest` (or wrote with `script`) already matches the database but is
+not in git yet: its *Changed in* reads **File, not committed** (`"uncommitted":
+true` in `--json`, origin still `database`), and `commit` takes it as it is.
 
 ## Working as a team
 
@@ -203,7 +209,9 @@ off each other's work:
   rebase or cherry-pick in progress, files still marked conflicted, or a repo
   where `user.name`/`user.email` are not set. `status` warns about them (and
   about a branch that is behind its upstream, as last fetched) under `warnings`
-  and `git` in `--json`.
+  and `git` in `--json`. A repo that sets only one of them in its own config
+  commits with the machine's other one; `status`, `commit` and `checkin` say so
+  (a warning, not a stop), naming the identity git will use.
 - **A half-merged object file** (one that still has `<<<<<<<` / `>>>>>>>`
   conflict markers) is left out of every comparison, with a warning and under
   `conflicted` in `--json`: `get-latest` will not run the markers as SQL and
@@ -270,7 +278,9 @@ off each other's work:
 
 - Objects only in the repo are created; foreign keys are added after every new table exists.
 - Views, functions, procedures and triggers that differ are changed with `ALTER`, so their permissions stay.
-  Ones that read each other are retried until they succeed, so file order never matters.
+  New and changed ones run after the ones their text names by a two-part name (a view after the
+  scalar function it calls), in the written script too; ones that still fail on a missing object
+  are retried until they succeed, so file order never matters.
 - Tables are altered, never rebuilt: columns are added, changed (`ALTER COLUMN`) or, with
   `--allow-drops`, dropped, and constraints and indexes are dropped and added by name. Rows are kept.
 - On SQL Server, Azure SQL and Fabric SQL database, `--allow-drops` refuses to drop an object or
@@ -299,6 +309,15 @@ locks:
   target: shared   # any target in this file: Azure SQL, SQL Server or Fabric Warehouse
   repo: sales-db   # optional; locks are scoped by the git origin URL by default
 ```
+
+Every clone has to arrive at the same scope, or teammates do not see each
+other's checkouts. sqlsc reads the origin URL into one name whatever its
+spelling: `https://`, `ssh://` and `git@host:` forms, a user or token, a port
+and `.git` are dropped (`github.com/org/repo`); Azure DevOps SSH and old
+`*.visualstudio.com` addresses become their `dev.azure.com/org/project/_git/repo`
+name; a folder remote reads with forward slashes (`C:\dev\remote.git` and
+`C:/dev/remote` are both `c:/dev/remote`). For any other mix of addresses,
+set `locks: repo:`.
 
 A Fabric Lakehouse or Synapse serverless pool cannot hold the table, so those
 need `locks: target:`. The `sqlsc` schema is never scripted or compared.
@@ -419,7 +438,9 @@ that is not there, before anything touches a database. Nobody publishes the dacp
 `get-latest` and `deploy` stay the way changes reach a database, and the build is
 the check in front of them. It needs the .NET SDK (`winget install Microsoft.DotNet.SDK.8`;
 SSMS's own build uses .NET 10) and restores the SDK package from NuGet on the first build.
-`bin/` and `obj/` are added to `.gitignore`; the project file is committed and is yours
+`bin/`, `obj/` and `.vs/` (where SSMS and Visual Studio keep their state once
+they open the project) are added to `.gitignore`, and the scripts folder gets the
+`.editorconfig` `init` writes if it has none; the project file is committed and is yours
 to edit (sqlsc never rewrites it unless `--force`). The project pins Microsoft.Build.Sql
 2.3.0, so SSMS 22's Database DevOps workload (which needs 2.1.0 or newer) and Visual
 Studio open it as a database project, and a project SSMS created is left as it is. Ready-made pipelines: [docs/ci/github-build.yml](docs/ci/github-build.yml)

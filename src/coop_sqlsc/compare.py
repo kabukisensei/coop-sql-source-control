@@ -29,6 +29,10 @@ class Change:
     file_text: str | None
     # Which side moved since the last sync (sync.DATABASE, REPO, BOTH or UNKNOWN).
     origin: str = UNKNOWN
+    # The database already matches the file; only git has not got the file yet (a file
+    # written by `script` or edited and applied with get-latest). Origin stays DATABASE:
+    # commit is still what settles it.
+    uncommitted: bool = False
 
     @property
     def path(self) -> str:
@@ -48,6 +52,7 @@ class Change:
         return {
             "action": self.action,
             "origin": self.origin,
+            "uncommitted": self.uncommitted,
             "type": self.key.type,
             "schema": self.key.schema,
             "name": self.key.name,
@@ -108,6 +113,8 @@ def compare(
 
 
 ORIGIN_WORDS = {DATABASE: "Database", REPO: "Repo", BOTH: "Both", UNKNOWN: ""}
+# The "Changed in" word for a change that is only a file git has not got yet.
+UNCOMMITTED_WORD = "File, not committed"
 
 
 def comparable(key: ObjectKey, text: str) -> str:

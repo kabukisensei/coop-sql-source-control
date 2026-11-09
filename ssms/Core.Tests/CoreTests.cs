@@ -89,6 +89,33 @@ namespace CoopSqlSourceControl.Core.Tests
         }
 
         [Fact]
+        public void OpenStartsAtTheSqlscYmlAboveTheOpenProject()
+        {
+            var repo = Path.Combine(Path.GetTempPath(), "repo");
+            var project = Path.Combine(repo, "database");
+            var yml = Path.Combine(repo, "sqlsc.yml");
+            Func<string, bool> exists = p => p == yml;
+            Assert.Equal(repo, RepoFolder.StartFolder(project, null, exists));
+            Assert.Equal(repo, RepoFolder.StartFolder(project + Path.DirectorySeparatorChar, null, exists));
+            Assert.Equal(repo, RepoFolder.StartFolder(repo, null, exists));
+            // No sqlsc.yml above the solution: the repo opened last, else the dialog's own choice.
+            var other = Path.Combine(Path.GetTempPath(), "other", "sqlsc.yml");
+            Assert.Equal(Path.GetDirectoryName(other), RepoFolder.StartFolder(Path.GetTempPath(), other, p => false));
+            Assert.Null(RepoFolder.StartFolder(null, null, exists));
+        }
+
+        [Fact]
+        public void NamesAFileTheDatabaseAlreadyMatchesAsNotCommitted()
+        {
+            var json = CliResult.FromOutput(0, "{\"ok\": true, \"changes\": [{\"action\": \"changed\", \"origin\": \"database\", \"uncommitted\": true, \"type\": \"view\", \"schema\": \"sales\", \"name\": \"v\", \"object\": \"[sales].[v]\"}]}", "").Json;
+            var change = Assert.Single(ChangeInfo.ListFrom(json));
+            Assert.Equal("File, not committed", change.OriginText);
+            Assert.Contains("the file is not committed yet", change.ToString());
+            // Still something to commit, not to get.
+            Assert.False(change.IsFromRepo);
+        }
+
+        [Fact]
         public void ReadsPendingAndRanMigrations()
         {
             var status = CliResult.FromOutput(0, Status, string.Empty).Json;

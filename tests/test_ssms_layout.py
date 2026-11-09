@@ -181,6 +181,7 @@ def test_init_layout_schema_writes_the_key_and_the_files_follow(tmp_path, fake_d
     assert sorted(_git(tmp_path, "show", "--name-only", "--format=", "HEAD").split()) == [
         ".gitattributes",
         ".gitignore",
+        "database/.editorconfig",
         "database/Security/sales.sql",
         "database/dbo/Tables/Customer.sql",
         "database/dbo/Views/vSales.sql",
@@ -342,6 +343,7 @@ def test_status_and_commit_place_a_new_trigger_in_the_table_file(tmp_path, fake_
     assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split() == [
         ".gitattributes",
         ".gitignore",
+        "database/.editorconfig",
         "database/dbo/Tables/Customer.sql",
         "sqlsc.yml",
     ]
