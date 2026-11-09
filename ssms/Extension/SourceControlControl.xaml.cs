@@ -147,7 +147,7 @@ namespace CoopSqlSourceControl
 
         private async void OnOpenRepo(object sender, RoutedEventArgs e)
         {
-            Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
+            await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
             var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Open a repo's sqlsc.yml", Filter = "sqlsc.yml|sqlsc.yml|YAML|*.yml;*.yaml" };
             var start = RepoFolder.StartFolder(SolutionFolder(), configPath ?? settings.Recent.FirstOrDefault()?.ConfigPath, File.Exists);
             if (start != null && Directory.Exists(start))
