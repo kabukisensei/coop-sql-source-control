@@ -57,6 +57,9 @@ namespace CoopSqlSourceControl.Core
         /// <summary>Which side moved since the last sync: database, repo, both or unknown.</summary>
         public string Origin { get; set; }
 
+        /// <summary>The database already matches the file; git has not got the file yet (sqlsc 1.0.18+).</summary>
+        public bool Uncommitted { get; set; }
+
         /// <summary>The name to hand back to sqlsc: schema.name, or the schema's own name.</summary>
         public string Name { get; set; }
 
@@ -64,7 +67,7 @@ namespace CoopSqlSourceControl.Core
 
         public string TypeText => TypeLabels.For(Type);
 
-        public string OriginText => OriginLabels.For(Origin);
+        public string OriginText => Uncommitted ? OriginLabels.UncommittedFile : OriginLabels.For(Origin);
 
         /// <summary>The lock owner as the grid shows it: "you" for your own checkout.</summary>
         public string LockedByText => LockedBy == null ? string.Empty : IsMine ? "you" : LockedBy;
@@ -76,7 +79,8 @@ namespace CoopSqlSourceControl.Core
 
         /// <summary>What a screen reader announces for the row (WPF uses ToString).</summary>
         public override string ToString() => ActionText + " " + TypeText + " " + Object
-            + (OriginText.Length > 0 ? ", changed in " + OriginText.ToLowerInvariant() : string.Empty)
+            + (Uncommitted ? ", the file is not committed yet"
+                : OriginText.Length > 0 ? ", changed in " + OriginText.ToLowerInvariant() : string.Empty)
             + (LockedByText.Length > 0 ? ", checked out by " + LockedByText : string.Empty);
 
         public static IList<ChangeInfo> ListFrom(JObject json)
@@ -91,6 +95,7 @@ namespace CoopSqlSourceControl.Core
                 LockedBy = c.Value<string>("locked_by"),
                 IsMine = Mine(c, user),
                 Origin = c.Value<string>("origin"),
+                Uncommitted = c.Value<bool?>("uncommitted") ?? false,
                 Name = QualifiedName(c.Value<string>("schema"), c.Value<string>("name")),
             }).ToList();
         }
@@ -261,6 +266,9 @@ namespace CoopSqlSourceControl.Core
 
     public static class OriginLabels
     {
+        /// <summary>A file the database already matches that is not committed yet (written by Script, or edited and applied with Get latest).</summary>
+        public const string UncommittedFile = "File, not committed";
+
         /// <summary>The "Changed in" column: empty when sqlsc has no sync record for the object.</summary>
         public static string For(string origin)
         {

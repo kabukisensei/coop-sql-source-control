@@ -321,13 +321,48 @@ def repo_id(root: Path, configured: str | None = None) -> str:
 
 
 def normalize_remote(url: str) -> str:
-    """git@github.com:org/repo.git and https://user@github.com/org/repo -> github.com/org/repo."""
+    """One name for every way a clone can spell its origin, so checkouts made from one
+    clone are seen from the others:
+
+    - git@github.com:org/repo.git, ssh://git@github.com:22/org/repo and
+      https://user@github.com/org/repo -> github.com/org/repo;
+    - Azure DevOps over SSH (git@ssh.dev.azure.com:v3/org/project/repo) and the old
+      org.visualstudio.com addresses -> dev.azure.com/org/project/_git/repo, the HTTPS name;
+    - a folder (C:\\dev\\remote.git, C:/dev/remote, file:///c:/dev/remote) -> c:/dev/remote.
+    """
     text = url.strip()
-    text = re.sub(r"^[a-z+]+://", "", text)
-    text = re.sub(r"^[^@/]+@", "", text)
-    text = text.replace(":", "/", 1) if re.match(r"^[^/]+:[^/]", text) and "://" not in url else text
-    text = re.sub(r"\.git/?$", "", text).rstrip("/")
+    if re.match(r"^file://", text, re.IGNORECASE):
+        text = re.sub(r"^file://", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^/(?=[A-Za-z]:)", "", text)
+        return _folder_remote(text)
+    if re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith(("/", "\\", ".")):
+        return _folder_remote(text)
+    scheme = re.match(r"^([a-z+]+)://", text, re.IGNORECASE)
+    text = text[scheme.end() :] if scheme else text
+    text = re.sub(r"^[^@/]+@", "", text)  # user or token
+    if scheme:
+        text = re.sub(r"^([^/:]+):\d+(?=/|$)", r"\1", text)  # a port
+    elif re.match(r"^[^/]+:[^/]", text):  # scp form host:path
+        text = text.replace(":", "/", 1)
+    text = re.sub(r"\.git/?$", "", text.rstrip("/")).rstrip("/").lower()
+    return _azure_devops(text)
+
+
+def _folder_remote(path: str) -> str:
+    text = path.replace("\\", "/")
+    text = re.sub(r"(?<!^)/{2,}", "/", text)
+    text = re.sub(r"\.git/?$", "", text.rstrip("/")).rstrip("/")
     return text.lower()
+
+
+def _azure_devops(text: str) -> str:
+    if m := re.match(r"^(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)/v3/([^/]+)/([^/]+)/([^/]+)$", text):
+        return f"dev.azure.com/{m[1]}/{m[2]}/_git/{m[3]}"
+    if m := re.match(r"^([^/.]+)\.visualstudio\.com/(?:defaultcollection/)?(.+)$", text):
+        return f"dev.azure.com/{m[1]}/{m[2]}"
+    if m := re.match(r"^dev\.azure\.com/([^/]+)/(?:defaultcollection/)?(.+)$", text):
+        return f"dev.azure.com/{m[1]}/{m[2]}"
+    return text
 
 
 def _git_config(root: Path, key: str) -> str:

@@ -78,6 +78,18 @@ class Plan:
     def runnable(self) -> list[Step]:
         return [s for s in self.steps if s.statements and s.action not in ("skip", "manual")]
 
+    def ordered(self) -> list[Step]:
+        """The runnable steps in the order they run: by phase, and inside the code phase
+        an object after the ones it names (a view after the scalar function it calls), so
+        a first release into an empty database works as a written script too, where
+        nothing is retried."""
+        out: list[Step] = []
+        steps = sorted(self.runnable, key=lambda s: (s.phase, s.key.sort_key))
+        for phase in sorted({s.phase for s in steps}):
+            group = [s for s in steps if s.phase == phase]
+            out.extend(_by_dependency(group) if phase == PH_CODE else group)
+        return out
+
     @property
     def held_back(self) -> list[Step]:
         return [s for s in self.steps if s.action in ("skip", "manual")]
@@ -88,7 +100,7 @@ class Plan:
             "-- Review before running it anywhere other than a development database.",
         ]
         lines = [*lines, ""]
-        for step in sorted(self.runnable, key=lambda s: (s.phase, s.key.sort_key)):
+        for step in self.ordered():
             lines.append(f"-- {step.action}: {step.key.display}")
             for note in step.notes:
                 lines.append(f"-- {note}")
@@ -531,6 +543,42 @@ def _undo_statement(table: str, statement: str) -> str:
     )
 
 
+def _by_dependency(steps: list[Step]) -> list[Step]:
+    """Code steps with each one after the steps whose objects its text names by their
+    two-part name, outside comments and strings. Ties and cycles keep the usual order
+    (type, schema, name); apply still retries what this misses (a one-part name)."""
+    by_name: dict[tuple[str, str], list[int]] = {}
+    for i, step in enumerate(steps):
+        by_name.setdefault((step.key.schema.lower(), step.key.name.lower()), []).append(i)
+    needs: list[set[int]] = []
+    for step in steps:
+        text = _mask_comments_and_strings("\n".join(step.statements))
+        found = {(_unquote(m["s"]), _unquote(m["n"])) for m in _TWO_PART.finditer(text)}
+        needs.append({j for name in found for j in by_name.get(name, []) if steps[j].key != step.key})
+    out: list[Step] = []
+    placed: set[int] = set()
+    remaining = list(range(len(steps)))
+    while remaining:
+        ready = next((i for i in remaining if needs[i] <= placed), remaining[0])
+        out.append(steps[ready])
+        placed.add(ready)
+        remaining.remove(ready)
+    return out
+
+
+_PART = r'\[(?:[^\]]|\]\])+\]|"(?:[^"]|"")+"|[A-Za-z_@#][\w@#$]*'
+# schema.name, not the last two parts of a three-part name (another database's object).
+_TWO_PART = re.compile(rf"(?<![\w@#$\].\"])(?P<s>{_PART})\s*\.\s*(?P<n>{_PART})(?![\w@#$])")
+
+
+def _unquote(part: str) -> str:
+    if part.startswith("["):
+        part = part[1:-1].replace("]]", "]")
+    elif part.startswith('"'):
+        part = part[1:-1].replace('""', '"')
+    return part.lower()
+
+
 def _is_foreign_key(statement: str) -> bool:
     return " FOREIGN KEY " in " ".join(statement.split()).upper()
 
@@ -545,6 +593,8 @@ _RETRYABLE = (
     "Invalid column name",
     "conflicted with the FOREIGN KEY constraint",
     "conflicted with the REFERENCE constraint",
+    "Cannot find either column",  # 4121: a scalar function not created yet
+    "Cannot schema bind",  # 4512: a schema-bound view or function on one not created yet
 )
 
 
@@ -573,7 +623,7 @@ def apply(conn: Any, plan: Plan, target: Target, closing: list[str] | None = Non
         conn.autocommit = False
     done: list[ObjectKey] = []
     failed: list[tuple[ObjectKey, str]] = []
-    steps = sorted(plan.runnable, key=lambda s: (s.phase, s.key.sort_key))
+    steps = plan.ordered()
     try:
         for phase in sorted({s.phase for s in steps}):
             pending = [s for s in steps if s.phase == phase]

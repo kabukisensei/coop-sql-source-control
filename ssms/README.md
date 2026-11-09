@@ -5,7 +5,9 @@ A window in SQL Server Management Studio over the same `sqlsc` command line:
 runs one `sqlsc --json` command and shows the answer, so the add-in, the CLI,
 coop-agent and CI always agree.
 
-- **Repo / Database**: open a repo's `sqlsc.yml` and pick one of its targets.
+- **Repo / Database**: open a repo's `sqlsc.yml` and pick one of its targets. The
+  open dialog starts at the `sqlsc.yml` above the project SSMS has open (the SQL
+  project sits in the scripts folder, one level down), else at the repo opened last.
   The add-in remembers recent repos and the target last used with each
   (`%APPDATA%\coop-sqlsc\ssms.json`); a remembered repo whose `sqlsc.yml` is
   gone leaves the list. The line under the status says which `sqlsc` the
@@ -14,7 +16,9 @@ coop-agent and CI always agree.
   sqlsc…**, which is forgotten once its file is gone), and warns when the
   add-in and `sqlsc` are not the same `major.minor`.
 - **Changes**: what differs between the database and the repo, which side
-  changed (*Changed in*: Database, Repo or Both, see the main README) and who
+  changed (*Changed in*: Database, Repo or Both, or *File, not committed* for a
+  file the database already matches that git has not got yet; see the main
+  README) and who
   has each object checked out (*you* for your own). Select rows, then
   **Commit** (with the message below), **Get latest…** (shows the script, then
   asks before running it), **Diff** (or double-click a row), **Check out**

@@ -247,6 +247,9 @@ class RepoState:
         self.upstream: str | None = _ok(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
         self.user_name = _ok(root, "config", "--get", "user.name") or ""
         self.user_email = _ok(root, "config", "--get", "user.email") or ""
+        # Set in this repository itself (.git/config), not inherited from the machine.
+        self.local_name = _ok(root, "config", "--local", "--get", "user.name") or ""
+        self.local_email = _ok(root, "config", "--local", "--get", "user.email") or ""
         self.in_progress = self._in_progress()
         self.unmerged = self._unmerged()
         self.ahead, self.behind = self._counts()
@@ -330,12 +333,29 @@ class RepoState:
             )
         return None
 
+    def mixed_identity(self) -> str | None:
+        """A warning when this repository sets only one of user.name and user.email, so a
+        commit pairs it with the machine's other one: a name from one person and an email
+        from another (often a personal address). None when both or neither are set here."""
+        if not self.has_identity or bool(self.local_name) == bool(self.local_email):
+            return None
+        here, there = ("user.name", "user.email") if self.local_name else ("user.email", "user.name")
+        value = self.user_email if self.local_name else self.user_name
+        return (
+            f"This repository sets {here} but not {there}, so commits use the machine's {there} "
+            f"({value}): {self.user_name} <{self.user_email}>. If that is not you here, set it: "
+            f"`git config {there} <yours>`."
+        )
+
     def warnings(self) -> list[str]:
-        """What status tells a person about the working copy."""
+        """What status (and commit) tell a person about the working copy."""
         notes: list[str] = []
         problem = self.commit_problem()
         if problem:
             notes.append("The repository is not ready for a commit: " + problem)
+        mixed = self.mixed_identity()
+        if mixed:
+            notes.append(mixed)
         if self.behind:
             notes.append(
                 f"This working copy is {self.behind} commit(s) behind {self.upstream} (as last fetched); "

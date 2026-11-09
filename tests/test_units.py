@@ -284,10 +284,16 @@ def test_commit_takes_files_that_match_the_database_but_not_head(tmp_path, fake_
     assert _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split() == [
         ".gitattributes",
         ".gitignore",
+        "database/.editorconfig",
         "database/Views/dbo.vSales.sql",
         "sqlsc.yml",
     ]
-    assert json.loads(first.output)["setup_files"] == ["sqlsc.yml", ".gitattributes", ".gitignore"]
+    assert json.loads(first.output)["setup_files"] == [
+        "sqlsc.yml",
+        ".gitattributes",
+        ".gitignore",
+        "database/.editorconfig",
+    ]
 
     # Edited by hand and applied: the database matches the file, HEAD does not.
     fake_db[view] = "CREATE VIEW dbo.vSales AS SELECT 2;\nGO\n"
@@ -995,7 +1001,7 @@ def test_commit_takes_new_migration_scripts_along(tmp_path, fake_db, monkeypatch
     rel = f"Migrations/{Path(added['path']).name}"
     assert result["commit"] and result["migrations"] == [rel]
     committed = _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split()
-    assert committed == [".gitattributes", ".gitignore", "database/" + rel, "sqlsc.yml"]
+    assert committed == [".gitattributes", ".gitignore", "database/.editorconfig", "database/" + rel, "sqlsc.yml"]
     assert "Add 1 migration script(s)" in _git(tmp_path, "log", "-1", "--format=%s")
 
 

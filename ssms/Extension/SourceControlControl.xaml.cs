@@ -147,11 +147,39 @@ namespace CoopSqlSourceControl
 
         private async void OnOpenRepo(object sender, RoutedEventArgs e)
         {
+            Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
             var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Open a repo's sqlsc.yml", Filter = "sqlsc.yml|sqlsc.yml|YAML|*.yml;*.yaml" };
+            var start = RepoFolder.StartFolder(SolutionFolder(), configPath ?? settings.Recent.FirstOrDefault()?.ConfigPath, File.Exists);
+            if (start != null && Directory.Exists(start))
+            {
+                dialog.InitialDirectory = start;
+            }
+
             if (dialog.ShowDialog() == true)
             {
                 await OpenRepoAsync(dialog.FileName);
             }
+        }
+
+        /// <summary>The open solution's folder (SSMS puts an opened SQL project in one), or null.</summary>
+        private static string SolutionFolder()
+        {
+            Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                var solution = Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsSolution))
+                    as Microsoft.VisualStudio.Shell.Interop.IVsSolution;
+                if (solution != null && solution.GetSolutionInfo(out var folder, out _, out _) == 0 && !string.IsNullOrEmpty(folder))
+                {
+                    return folder;
+                }
+            }
+            catch (Exception)
+            {
+                // No solution service: the dialog starts where it would have.
+            }
+
+            return null;
         }
 
         private async void OnRepoChanged(object sender, SelectionChangedEventArgs e)

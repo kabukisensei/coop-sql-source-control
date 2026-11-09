@@ -28,7 +28,20 @@ PLATFORMS = {
     "synapse_serverless": "Microsoft.Data.Tools.Schema.Sql.SqlServerlessDatabaseSchemaProvider",
 }
 
-IGNORE_LINES = ("bin/", "obj/")
+# The build's output, and the folder SSMS and Visual Studio keep their own state in once
+# they open the project.
+IGNORE_LINES = ("bin/", "obj/", ".vs/")
+
+# Beside the scripts: SSMS and Visual Studio save a .sql file with a byte order mark unless
+# told otherwise, so the first save of a file sqlsc wrote shows in git as a change with no
+# SQL in it. charset = utf-8 is UTF-8 without one, the way sqlsc writes its files.
+EDITORCONFIG_NAME = ".editorconfig"
+EDITORCONFIG = (
+    "# Written by sqlsc: SSMS and Visual Studio save .sql files as sqlsc writes them,\n"
+    "# UTF-8 without a byte order mark, so a first save is not a change in git.\n"
+    "[*.sql]\n"
+    "charset = utf-8\n"
+)
 
 
 def project_name(database: str, folder: str) -> str:
@@ -75,6 +88,16 @@ def write(scripts_dir: Path, name: str, kind: str, *, force: bool = False) -> tu
     scripts_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(render(name, kind), encoding="utf-8", newline="\n")
     return path, True
+
+
+def write_editorconfig(scripts_dir: Path) -> bool:
+    """Writes the scripts folder's .editorconfig unless it has one; True when written."""
+    path = scripts_dir / EDITORCONFIG_NAME
+    if path.exists():
+        return False
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(EDITORCONFIG, encoding="utf-8", newline="\n")
+    return True
 
 
 def ignore_build_output(root: Path) -> list[str]:
