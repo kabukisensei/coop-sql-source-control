@@ -1115,6 +1115,7 @@ def checkin(
         state = None
         pulled: list[Change] = []
         conflicted: list[ObjectKey] = []
+        unread: list[ObjectKey] = []
         shared: dict[ObjectKey, str] = {}
         # A checkout an agent took for this person (`coop-agent:ada@…`) is work the agent
         # prepared and the person is now checking in: the commit says so in a trailer.
@@ -1135,10 +1136,13 @@ def checkin(
             # A file with unresolved merge conflict markers is out of the comparison, so
             # it has no Change; "no difference" is not "committed" (#43).
             conflicted = sorted((k for k in state.conflicted if k in wanted), key=lambda k: k.sort_key)
+            # An object the database did not give sqlsc is out of the comparison too:
+            # its work was neither read nor committed, so it stays checked out (#77).
+            unread = sorted((k for k in state.unread if k in wanted), key=lambda k: k.sort_key)
             sha, branch = _commit_changes(opts, state, changes, message, push, prepared_by=agents)
         # What was held back is not in git yet: it stays checked out, so nobody else
         # edits it while the conflict is sorted out. --no-commit releases on purpose.
-        keeping = {c.key for c in held_back} | set(conflicted)
+        keeping = {c.key for c in held_back} | set(conflicted) | set(unread)
         to_release = [k for k in keys if k not in keeping]
         released: list[ObjectKey] = []
         if to_release:
@@ -1154,12 +1158,13 @@ def checkin(
         "files": [c.to_json() for c in changes],
         "released": [_key_json(k) for k in released],
         "held_back": [{**c.to_json(), "reason": _hold_reason(c, pulled, shared)} for c in held_back]
-        + [_conflicted_json(k) for k in conflicted],
+        + [_conflicted_json(k) for k in conflicted]
+        + [_unread_json(k, state.unread[k]) for k in unread],
         "not_checked_out": list(unknown),
         "warnings": state.warnings if state is not None else [],
     }
     if opts.as_json:
-        ok = not unknown and not held_back and not conflicted
+        ok = not unknown and not held_back and not conflicted and not unread
         sys.stdout.write(json.dumps({"ok": ok, **payload}, indent=2) + "\n")
     else:
         if not keys and not unknown:
@@ -1171,7 +1176,7 @@ def checkin(
                 f"[green]✓[/] Committed {len(changes)} object(s) as [bold]{sha}[/]"
                 + (f" and pushed {escape(branch)}." if branch else ".")
             )
-        elif keys and not no_commit:
+        elif keys and not no_commit and not unread:
             console.print("[dim]The checked-out objects match the repo; nothing to commit.[/]")
         for key in released:
             console.print(f"[green]✓[/] Released {escape(key.display)}")
@@ -1184,11 +1189,16 @@ def checkin(
             console.print(
                 f"[yellow]![/] Kept {escape(key.display)} checked out, not committed: {escape(_CONFLICT_REASON)}"
             )
+        for key in unread:
+            console.print(
+                f"[yellow]![/] Kept {escape(key.display)} checked out, not committed: "
+                f"{escape(_unread_reason(state.unread[key]))}"
+            )
         for name in unknown:
             console.print(f"[yellow]![/] {escape(name)} is not checked out by {escape(session.who)}.")
         if state is not None:
             _print_warnings(state.warnings)
-    if unknown or held_back or conflicted:
+    if unknown or held_back or conflicted or unread:
         sys.exit(1)
 
 
@@ -1506,6 +1516,22 @@ def _conflicted_json(key: ObjectKey) -> dict[str, str]:
         **_key_json(key),
         "path": relative_path(key),
         "reason": _CONFLICT_REASON,
+    }
+
+
+def _unread_reason(why: str) -> str:
+    return f"it could not be read from the database ({why}), so nothing was committed for it"
+
+
+def _unread_json(key: ObjectKey, why: str) -> dict[str, str]:
+    """A held-back entry for an object the database did not give sqlsc (#77): no
+    Change, only a reason."""
+    return {
+        "action": "unread",
+        "origin": UNKNOWN,
+        **_key_json(key),
+        "path": relative_path(key),
+        "reason": _unread_reason(why),
     }
 
 

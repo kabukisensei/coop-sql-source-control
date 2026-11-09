@@ -99,8 +99,10 @@ def track_columns(conn: Any, key: ObjectKey) -> tuple[list[DataColumn], list[str
     if not rows:
         raise TableMissing(f"{key.display} is not a table in this database.")
     columns: list[DataColumn] = []
+    left_out: dict[str, str] = {}
     for col_name, base, max_length, precision, scale, identity, computed in rows:
         if computed or base in _SKIPPED:
+            left_out[col_name] = "a computed column" if computed else f"a {base} column"
             continue
         if base in _UNSUPPORTED:
             raise DataError(f"{key.display} has a {base} column ({col_name}); static data cannot hold {base} values.")
@@ -111,6 +113,16 @@ def track_columns(conn: Any, key: ObjectKey) -> tuple[list[DataColumn], list[str
         raise DataError(f"{key.display} has no primary key or unique constraint, so its rows cannot be matched.")
     first = (key_rows[0][0], key_rows[0][1])
     key_columns = [r[2] for r in key_rows if (r[0], r[1]) == first]
+    # Rows are matched on the key in the script's own rows: a key column the script
+    # does not hold would leave the MERGE matching on a column it never selects (#84).
+    missing = [c for c in key_columns if c in left_out]
+    if missing:
+        what = "primary key" if first[0] == "PK" else f"unique constraint {first[1]}"
+        raise DataError(
+            f"{key.display}'s {what} uses "
+            + ", ".join(f"{c} ({left_out[c]})" for c in missing)
+            + ", which static data cannot hold, so its rows cannot be matched."
+        )
     return columns, key_columns
 
 

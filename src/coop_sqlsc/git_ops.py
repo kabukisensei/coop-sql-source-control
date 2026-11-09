@@ -11,6 +11,11 @@ import subprocess
 import time
 from pathlib import Path
 
+# Every path sqlsc hands git is a file name, never a pattern: a name holding `*`, `?`
+# or `[...]` (all legal in a SQL object's name) must not match other files, or a
+# commit of the files a command chose could take in one it held back.
+GIT = ["git", "--literal-pathspecs"]
+
 
 class GitError(Exception):
     """git is missing, the folder is not a repo, or a git command failed."""
@@ -34,7 +39,7 @@ def _git_once(cwd: Path, *args: str) -> str:
         # git writes paths and messages as UTF-8 whatever the console's code page (a
         # Windows cp1252 locale would read "Café" wrong), so never decode by locale.
         done = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+            [*GIT, *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
         )
     except FileNotFoundError as exc:
         raise GitError("git is not installed or not on PATH.") from exc
@@ -66,7 +71,7 @@ def commit_paths(root: Path, paths: list[Path], message: str, trailers: list[str
 
     `trailers` are git trailer lines ("Prepared-by: coop-agent 0.38.6") added as the
     message's last paragraph, so `git log` and `git interpret-trailers` read them."""
-    rel = [str(p.resolve().relative_to(root.resolve())) for p in paths]
+    rel = [p.resolve().relative_to(root.resolve()).as_posix() for p in paths]
     if not rel:
         return None
     _git(root, "add", "-A", "--", *rel)
@@ -107,7 +112,7 @@ def uncommitted(root: Path, folder: Path) -> dict[str, str]:
     prefix = "" if prefix == "." else prefix + "/"
     try:
         done = subprocess.run(
-            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", prefix or "."],
+            [*GIT, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", prefix or "."],
             cwd=root,
             capture_output=True,
             check=False,
@@ -161,7 +166,7 @@ def read_tree(root: Path, commit: str, folder: Path) -> dict[str, str]:
     prefix = "" if prefix == "." else prefix + "/"
     try:
         listed = subprocess.run(
-            ["git", "-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--name-only", commit, "--", prefix or "."],
+            [*GIT, "-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--name-only", commit, "--", prefix or "."],
             cwd=root,
             capture_output=True,
             check=False,

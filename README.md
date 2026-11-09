@@ -221,7 +221,8 @@ off each other's work:
   a view, procedure, function or trigger whose definition comes back empty
   (`WITH ENCRYPTION`, or a login without `VIEW DEFINITION` on it), and a
   tracked static-data table that is still there but whose rows cannot be read
-  as static data (it lost its primary key, or gained a `geometry` column). Its
+  as static data (it lost its primary key, gained a `geometry` column, or its
+  key uses a computed or `timestamp` column, which static data does not hold). Its
   file, HEAD and its sync record stay as they are, it is listed under `unread`,
   and it is compared again once it can be read. A dropped object or table is
   still a deletion; `sqlsc data remove` still stops tracking a table's rows.
@@ -305,8 +306,9 @@ need `locks: target:`. The `sqlsc` schema is never scripted or compared.
 - `status` shows who has each changed object checked out.
 - `commit` leaves objects someone else has checked out for them to check in
   (`--force` commits them anyway); `checkin` commits only your own. An object
-  `checkin` cannot commit (the repo changed it too since your last sync, or its
-  file still has merge conflict markers) stays checked out, listed under
+  `checkin` cannot commit (the repo changed it too since your last sync, its
+  file still has merge conflict markers, or the database did not give sqlsc its
+  definition or rows) stays checked out, listed under
   `held_back`, and `checkin` exits 1; `--no-commit` still releases everything.
 - Checking out the same object twice is fine; checking out someone else's fails
   with their name, when they took it and their note, and exits 1.
