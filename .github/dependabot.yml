@@ -1,0 +1,12 @@
+# Keeps the commit-SHA pins on GitHub Actions current: one grouped PR a week
+# when any action in .github/workflows/ has a newer release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
