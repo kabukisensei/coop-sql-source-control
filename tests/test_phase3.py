@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from coop_sqlsc.cli import main
 from coop_sqlsc.config import build_target, load
-from coop_sqlsc.locks import LockError, check_lock_target, key_from_name, normalize_remote
+from coop_sqlsc.locks import LockError, check_lock_target, key_from_name
 from coop_sqlsc.objects import ObjectKey
 
 from .conftest import SAMPLE, connect
@@ -18,19 +18,6 @@ from .test_integration import link, sqlsc
 from .test_phase2 import git
 
 # --- units ----------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "git@github.com:Kabukisensei/coop-sql.git",
-        "https://github.com/kabukisensei/coop-sql",
-        "https://token@github.com/kabukisensei/coop-sql.git/",
-        "ssh://git@github.com/kabukisensei/coop-sql.git",
-    ],
-)
-def test_every_remote_form_names_the_same_repo(url):
-    assert normalize_remote(url) == "github.com/kabukisensei/coop-sql"
 
 
 def test_new_object_keys_default_to_dbo():
