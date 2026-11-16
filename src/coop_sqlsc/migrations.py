@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import sqltext
 from .objects import ObjectKey, batches
 
 FOLDER = "Migrations"
@@ -37,7 +38,11 @@ BEFORE, AFTER = "before", "after"
 # it is, and the script would run again on every update (#51). Checked before any
 # migration runs; new_file never makes one.
 MAX_ID = 200
-_WHEN = re.compile(r"^\s*--\s*sqlsc\s*:\s*(before|after)\s*$", re.IGNORECASE | re.MULTILINE)
+# The marker is one line comment at the head of the script: among the first three
+# lines and before any code. A marker-shaped line inside a string literal, a quoted
+# name or a block comment is that literal's text, not a directive (#92).
+_WHEN = re.compile(r"^--\s*sqlsc\s*:\s*(before|after)\s*$", re.IGNORECASE)
+_HEADER_LINES = 3
 
 CREATE_TABLE = """
 IF OBJECT_ID('sqlsc.Migration') IS NULL
@@ -100,10 +105,31 @@ class Applied:
         return {"id": self.id, "applied_at": self.at.replace(tzinfo=timezone.utc).isoformat(), "applied_by": self.by}
 
 
+def _header(text: str) -> tuple[str, int, int] | None:
+    """The marker's (when, start, end) when the script opens with one, else None.
+
+    Walks the script's lexical runs from the top: whitespace and block comments are
+    skipped, a line comment is read as a candidate, and the first code stops the
+    search. `end` is past the marker line's line break, so text[start:end] is the
+    whole line."""
+    pos = 0
+    for kind, run in sqltext.runs(text):
+        start, pos = pos, pos + len(run)
+        if text.count("\n", 0, start) >= _HEADER_LINES:
+            return None
+        if kind == "comment" and run.startswith("--"):
+            match = _WHEN.match(run.rstrip("\r"))
+            if match:
+                end = pos + 1 if text.startswith("\n", pos) else pos
+                return match.group(1).lower(), start, end
+        elif kind != "comment" and run.strip():
+            return None
+    return None
+
+
 def parse(id_: str, text: str) -> Migration:
-    head = "\n".join(text.split("\n", 3)[:3])  # the marker is a header line, not buried in the body
-    match = _WHEN.search(head)
-    return Migration(id_, text, match.group(1).lower() if match else AFTER)
+    header = _header(text)
+    return Migration(id_, text, header[0] if header else AFTER)
 
 
 def from_files(files: dict[str, str]) -> list[Migration]:
@@ -170,8 +196,14 @@ def record_sql(migration: Migration, who: str, commit: str | None) -> str:
 
 
 def statements(migration: Migration) -> list[str]:
-    """The script's batches, without the `-- sqlsc:` marker line."""
-    return batches(_WHEN.sub("", migration.text, count=1))
+    """The script's batches, without the `-- sqlsc:` marker line. Only the header
+    line is taken out: a marker-shaped line in the body, or inside a literal, is
+    the script's own text and stays as written (#92)."""
+    header = _header(migration.text)
+    if header is None:
+        return batches(migration.text)
+    _, start, end = header
+    return batches(migration.text[:start] + migration.text[end:])
 
 
 def new_file(root: Path, name: str, when: str = AFTER, now: datetime | None = None) -> Path:
