@@ -880,6 +880,45 @@ def test_migration_files_know_when_they_run_and_when_they_were_edited(tmp_path):
     assert mig.read_folder(tmp_path)[0].when == "after"
 
 
+def test_migration_marker_is_a_header_comment_not_body_text():
+    """#92: a `-- sqlsc:` line inside a literal, a quoted name or a block comment is
+    the script's text: it neither picks the phase nor gets taken out."""
+    from coop_sqlsc import migrations as mig
+
+    literal = "INSERT INTO dbo.Example (Body) VALUES (N'first\n-- sqlsc: before\nlast');\n"
+    m = mig.parse("literal", literal)
+    assert m.when == "after" and mig.statements(m) == [literal.strip()]
+    late = "-- note 1\n-- note 2\n-- note 3\n" + literal
+    m = mig.parse("late", late)
+    assert m.when == "after" and mig.statements(m) == [late.strip()]
+    unicode_literal = "SELECT N'ünïcode\n-- sqlsc: before' AS x;\n"
+    m = mig.parse("unicode", unicode_literal)
+    assert m.when == "after" and mig.statements(m) == [unicode_literal.strip()]
+    quoted = "SELECT 1 AS [a\n-- sqlsc: before\n];\n"
+    m = mig.parse("quoted", quoted)
+    assert m.when == "after" and mig.statements(m) == [quoted.strip()]
+    block = "/* header\n-- sqlsc: before\n*/\nSELECT 1;\n"
+    m = mig.parse("block", block)
+    assert m.when == "after" and mig.statements(m) == [block.strip()]
+    body = "SELECT 1;\n-- sqlsc: before\nSELECT 2;\n"
+    m = mig.parse("body", body)
+    assert m.when == "after" and mig.statements(m) == [body.strip()]
+
+    # real headers: after a block comment, after a note, with CRLF and a BOM-stripped file
+    for text, when, rest in [
+        ("-- sqlsc: before\nSELECT 1;\n", "before", ["SELECT 1;"]),
+        ("-- SQLSC : After\nSELECT 1;\n", "after", ["SELECT 1;"]),
+        ("/* note */\n-- sqlsc: before\nSELECT 1;\n", "before", ["/* note */\nSELECT 1;"]),
+        ("-- note\n-- sqlsc: before\nSELECT 1;\nGO\nSELECT 2;\n", "before", ["-- note\nSELECT 1;", "SELECT 2;"]),
+        ("-- sqlsc: before\r\nSELECT 1;\r\n", "before", ["SELECT 1;"]),
+        ("-- a\n-- b\n-- c\n-- sqlsc: before\nSELECT 1;\n", "after", ["-- a\n-- b\n-- c\n-- sqlsc: before\nSELECT 1;"]),
+    ]:
+        m = mig.parse("real", text)
+        assert (m.when, mig.statements(m)) == (when, rest), text
+    found = mig.from_files({"Migrations/001.sql": "\ufeff-- sqlsc: before\nSELECT 1;\n"})
+    assert found[0].when == "before" and mig.statements(found[0]) == ["SELECT 1;"]
+
+
 def _fake_migration_store(monkeypatch, applied: dict):
     from coop_sqlsc import migrations as mig
 
