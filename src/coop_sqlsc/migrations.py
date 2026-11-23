@@ -206,6 +206,10 @@ def statements(migration: Migration) -> list[str]:
     return batches(migration.text[:start] + migration.text[end:])
 
 
+class MigrationExists(Exception):
+    """`migrations add` would write over a script that is already there (#96)."""
+
+
 def new_file(root: Path, name: str, when: str = AFTER, now: datetime | None = None) -> Path:
     """Creates Migrations/<yyyymmddHHMMSS>_<name>.sql with a short header, and returns it.
 
@@ -222,6 +226,15 @@ def new_file(root: Path, name: str, when: str = AFTER, now: datetime | None = No
         "-- Separate batches with GO. Keep it re-runnable where you can (IF EXISTS, MERGE).",
         "",
     ]
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
+    try:
+        # Exclusive: a second script made in the same second under the same name must
+        # never write over the first one's SQL (#96).
+        handle = path.open("x", encoding="utf-8", newline="\n")
+    except FileExistsError:
+        raise MigrationExists(
+            f"{path} already exists (a script of that name was made in the same second). "
+            "Write in that file, or pick another name."
+        ) from None
+    with handle:
         handle.write("\n".join(lines))
     return path

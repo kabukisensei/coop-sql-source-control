@@ -27,7 +27,7 @@ LARGE_TABLE = 1000
 
 COLUMNS_SQL = """
 SELECT c.name, CASE WHEN t.is_user_defined = 0 THEN t.name ELSE TYPE_NAME(c.system_type_id) END,
-       c.max_length, c.precision, c.scale, c.is_identity, c.is_computed
+       c.max_length, c.precision, c.scale, c.is_identity, c.is_computed, c.is_nullable
 FROM sys.columns AS c
 JOIN sys.tables AS tb ON tb.object_id = c.object_id
 JOIN sys.types AS t ON t.user_type_id = c.user_type_id
@@ -71,6 +71,7 @@ class DataColumn:
     sql_type: str  # what the source rows are cast to
     identity: bool
     kind: str  # num, str, nstr, bin
+    nullable: bool = False  # a nullable key column is matched null-safely (#95)
 
     def select_expression(self) -> str:
         col = quote(self.name)
@@ -100,14 +101,14 @@ def track_columns(conn: Any, key: ObjectKey) -> tuple[list[DataColumn], list[str
         raise TableMissing(f"{key.display} is not a table in this database.")
     columns: list[DataColumn] = []
     left_out: dict[str, str] = {}
-    for col_name, base, max_length, precision, scale, identity, computed in rows:
+    for col_name, base, max_length, precision, scale, identity, computed, nullable in rows:
         if computed or base in _SKIPPED:
             left_out[col_name] = "a computed column" if computed else f"a {base} column"
             continue
         if base in _UNSUPPORTED:
             raise DataError(f"{key.display} has a {base} column ({col_name}); static data cannot hold {base} values.")
         sql_type = _cast_type(base, int(max_length), int(precision), int(scale))
-        columns.append(DataColumn(col_name, base, sql_type, bool(identity), _kind(base)))
+        columns.append(DataColumn(col_name, base, sql_type, bool(identity), _kind(base), bool(nullable)))
     key_rows = cur.execute(KEY_SQL, name).fetchall()
     if not key_rows:
         raise DataError(f"{key.display} has no primary key or unique constraint, so its rows cannot be matched.")
@@ -166,7 +167,8 @@ def render(
         values = ", ".join(_literal(value, col.kind) for value, col in zip(row, columns, strict=True))
         lines.append(f"        {'      ' if i == 0 else '     ,'}({values})")
     lines += [f"    ) AS v ({', '.join(names)})", ") AS source"]
-    lines.append("ON " + " AND ".join(f"target.{quote(c)} = source.{quote(c)}" for c in key_columns))
+    by_name = {c.name: c for c in columns}
+    lines.append("ON " + " AND ".join(_key_match(by_name[c]) for c in key_columns))
     if updatable:
         left = ", ".join(_comparable("target", c, binary_compare) for c in updatable)
         right = ", ".join(_comparable("source", c, binary_compare) for c in updatable)
@@ -180,6 +182,17 @@ def render(
     if identity:
         lines += [f"SET IDENTITY_INSERT {table} OFF;", "GO"]
     return normalize("\n".join(lines))
+
+
+def _key_match(col: DataColumn) -> str:
+    """One key column's ON predicate. A primary key column is never null, but a
+    unique constraint (the fallback key) takes a NULL, and `NULL = NULL` is not
+    true: two rows whose keys are both NULL would be an INSERT and a DELETE
+    instead of one match (#95)."""
+    ref = f"target.{quote(col.name)}", f"source.{quote(col.name)}"
+    if not col.nullable:
+        return f"{ref[0]} = {ref[1]}"
+    return f"({ref[0]} = {ref[1]} OR ({ref[0]} IS NULL AND {ref[1]} IS NULL))"
 
 
 def identity_off(text: str) -> str | None:
