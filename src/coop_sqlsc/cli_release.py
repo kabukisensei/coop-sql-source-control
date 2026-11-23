@@ -357,7 +357,11 @@ def migrations(ctx: click.Context, target_name: str | None) -> None:
 def migrations_add(opts: Opts, name: str, before: bool) -> None:
     """Create Migrations/<yyyymmddHHMMSS>_<name>.sql to write the script in."""
     cfg = _load_config(opts)
-    path = migrations_mod.new_file(cfg.scripts_dir, name, migrations_mod.BEFORE if before else migrations_mod.AFTER)
+    try:
+        path = migrations_mod.new_file(cfg.scripts_dir, name, migrations_mod.BEFORE if before else migrations_mod.AFTER)
+    except migrations_mod.MigrationExists as exc:
+        fail(opts, "migrations add", str(exc))
+        raise
     emit(opts, {"command": "migrations add", "path": str(path), "when": "before" if before else "after"})
     if not opts.as_json:
         console.print(f"[green]✓[/] Created {escape(str(path))}. Write the script there; commit takes it along.")

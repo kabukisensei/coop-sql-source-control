@@ -92,7 +92,7 @@ class DataConn:
         return [("1",)]
 
 
-INT_ID = ("Id", "int", 4, 10, 0, False, False)
+INT_ID = ("Id", "int", 4, 10, 0, False, False, False)
 PK = ("PK", "PK_T", "Id")
 
 
@@ -100,7 +100,7 @@ PK = ("PK", "PK_T", "Id")
     "columns, keys, why",
     [
         ([INT_ID], [], "no primary key"),
-        ([INT_ID, ("Shape", "geometry", -1, 0, 0, False, False)], [PK], "geometry"),
+        ([INT_ID, ("Shape", "geometry", -1, 0, 0, False, False, False)], [PK], "geometry"),
     ],
 )
 def test_a_present_table_that_cannot_be_read_as_data_is_unread(columns, keys, why):
@@ -303,7 +303,7 @@ def test_unreadable_static_data_is_held_then_recovers(repo, change):
     if change == "key":
         repo.data_keys = []
     else:
-        repo.data_columns = [INT_ID, ("Shape", "geometry", -1, 0, 0, False, False)]
+        repo.data_columns = [INT_ID, ("Shape", "geometry", -1, 0, 0, False, False, False)]
 
     status = json.loads(run(repo, "--json", "status").output)
     assert status["unread"] == ["Data/dbo.T.sql"]

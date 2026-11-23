@@ -24,10 +24,10 @@ from .test_unread_objects import DATA, INT_ID, PK, VIEW, DataConn, without_view_
 from .test_unread_objects import repo as unread_repo  # noqa: F401  (fixture)
 
 TARGET = Target("dev", "sql_server", "", "Fixture", "entra")
-BASE = ("Base", "int", 4, 10, 0, False, False)
-COMPUTED_KEY = ("ComputedKey", "int", 4, 10, 0, False, True)
-LABEL = ("Label", "nvarchar", 40, 0, 0, False, False)
-STAMP = ("Stamp", "timestamp", 8, 0, 0, False, False)
+BASE = ("Base", "int", 4, 10, 0, False, False, False)
+COMPUTED_KEY = ("ComputedKey", "int", 4, 10, 0, False, True, False)
+LABEL = ("Label", "nvarchar", 40, 0, 0, False, False, False)
+STAMP = ("Stamp", "timestamp", 8, 0, 0, False, False, False)
 
 
 # --- #84 a key column the data script does not hold ---------------------------------------
@@ -106,7 +106,7 @@ def test_tracked_data_whose_key_becomes_computed_is_held_then_recovers(unread_re
     repo = unread_repo
     path = repo / "database" / "Data" / "dbo.T.sql"
     before, head = path.read_text(encoding="utf-8"), repo.git("rev-parse", "HEAD")
-    repo.data_columns = [("Id", "int", 4, 10, 0, False, True)]
+    repo.data_columns = [("Id", "int", 4, 10, 0, False, True, False)]
     status = json.loads(run(repo, "--json", "status").output)
     assert status["unread"] == ["Data/dbo.T.sql"] and status["changes"] == []
     assert any("computed column" in w for w in status["warnings"])
