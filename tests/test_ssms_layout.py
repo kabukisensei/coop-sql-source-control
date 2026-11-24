@@ -101,7 +101,8 @@ def test_status_warns_and_script_commit_get_latest_refuse_on_a_mixed_folder(tmp_
     fake_db[VIEW] = "CREATE VIEW dbo.vSales AS SELECT 1;\nGO\n"
     ssms = tmp_path / "database" / "dbo" / "Views"
     ssms.mkdir(parents=True)
-    (ssms / "vSales.sql").write_text("\ufeffCREATE VIEW [dbo].[vSales] AS SELECT 1;\r\n", encoding="utf-8")
+    # newline="" keeps the CRLF. Text mode would turn that \n into os.linesep and write CR CR LF on Windows.
+    (ssms / "vSales.sql").write_text("\ufeffCREATE VIEW [dbo].[vSales] AS SELECT 1;\r\n", encoding="utf-8", newline="")
 
     status = json.loads(run(tmp_path, "status").output)
     _git(tmp_path, "add", "-A")
@@ -227,8 +228,10 @@ def test_a_folder_ssms_filled_is_recognised_without_the_key(tmp_path, fake_db): 
     # `sqlsc init` run at the repo root over a project SSMS created: no --layout needed.
     project = tmp_path / "Sales"
     (project / "dbo" / "Tables").mkdir(parents=True)
+    # newline="" keeps the CRLF an SSMS file actually has. Text mode would translate each
+    # \n to os.linesep, so on Windows the file would be CR CR LF and status would see a change.
     (project / "dbo" / "Tables" / "Customer.sql").write_text(
-        "\ufeff" + TABLE_TEXT.replace("\n", "\r\n"), encoding="utf-8"
+        "\ufeff" + TABLE_TEXT.replace("\n", "\r\n"), encoding="utf-8", newline=""
     )
     (project / "Sales.sqlproj").write_text('<Project Sdk="Microsoft.Build.Sql/2.3.0" />\n')
     done = _init(tmp_path, "--folder", "Sales")
@@ -307,7 +310,7 @@ def test_a_dacfx_table_file_with_triggers_reads_as_table_plus_triggers(tmp_path)
         "    BEGIN\r\n        SET NoCount ON\r\n    END\r\n\r\nGO\r\n" + TRIGGER_TEXT
     )
     (tmp_path / "dbo" / "Tables").mkdir(parents=True)
-    (tmp_path / "dbo" / "Tables" / "Customer.sql").write_text(dacfx, encoding="utf-8")
+    (tmp_path / "dbo" / "Tables" / "Customer.sql").write_text(dacfx, encoding="utf-8", newline="")
     objects, _ = read_folder(tmp_path)
     assert set(objects) == {TABLE, TRIGGER, second}
     assert objects[TABLE] == "CREATE TABLE [dbo].[Customer] (\n    [Id] INT NOT NULL\n);\nGO\n"
