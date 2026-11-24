@@ -645,12 +645,14 @@ See [docs/coop-agent.md](docs/coop-agent.md).
 Releasing the package: bump `__version__` in `src/coop_sqlsc/__init__.py` (the one
 place the version is written), merge, then push the matching `vX.Y.Z` tag or run
 the Release workflow by hand with that tag. `.github/workflows/release.yml` checks
-the tag against `__version__`, builds the wheel and the SSMS add-in, attaches both
-to a GitHub Release, then prints the coop-website sync command to run by hand
-(`bash scripts/sync-release.sh coop-sql-source-control X.Y.Z` in a site clone): the
-site's reusable sync workflow lives in a private repository, which a public
-repository like this one cannot call. Releases happen only when Aaron asks for one
-and names the version.
+the tag against `__version__`, builds the wheel and the SSMS add-in, and attaches
+both to a GitHub Release. Once the `COOP_WEBSITE_DISPATCH_TOKEN` secret exists, the
+`website` job then sends a `repository_dispatch` (`event_type: coop-release`,
+payload `repo` plus `tag`) to `kabukisensei/coop-website` and the site syncs on its
+own. `repo` is this repository's name and `tag` is the `vX.Y.Z` release tag. Without
+that secret the job prints a notice and the release still stands; run the
+`sync-release` workflow in `kabukisensei/coop-website` by hand with that repo and
+tag. Releases happen only when Aaron asks for one and names the version.
 
 ```bash
 pip install -e ".[dev]" ruff

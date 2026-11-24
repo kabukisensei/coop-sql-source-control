@@ -3,7 +3,8 @@ name: Release
 # Pushing a tag like v1.0.0, or running this workflow by hand with that tag as input,
 # builds the CLI package and the SSMS add-in and attaches both to a GitHub Release of
 # the tag, so the team installs from one download. Run by hand, it creates the tag on
-# the commit it was started from.
+# the commit it was started from. The website job then asks kabukisensei/coop-website
+# to sync docs for that tag.
 on:
   push:
     tags: ["v*"]
@@ -80,17 +81,39 @@ jobs:
             --target "$GITHUB_SHA" --title "$TAG" --generate-notes
 
   website:
-    # The coop-website sync (its .github/workflows/sync-release.yml, which moves the
-    # site's badges, pins and changelog and opens the PR) is a reusable workflow in a
-    # PRIVATE repository, and GitHub lets only private repositories call those; this
-    # repository is public, so a `uses:` of it fails at planning and no release can
-    # start. Until the site repository is public (or the sync is a dispatchable
-    # workflow), this job prints the command a person runs in a coop-website clone.
-    needs: [cli, release]
-    runs-on: ubuntu-24.04
+    # kabukisensei/coop-website listens for repository_dispatch event_type
+    # coop-release with client_payload {repo, tag}. The release job is named
+    # `release` and has no `if:`; it runs for every trigger of this workflow
+    # (a v* tag push, or workflow_dispatch), after cli and ssms-vsix succeed.
+    # This job follows that gate with needs: [release] and no `if:` of its own.
+    #
+    # The tag is not a job output. The release job reads it as
+    # `inputs.tag || github.ref_name`: on a tag push github.ref_name is the tag,
+    # and on workflow_dispatch github.ref_name is the branch the run started from
+    # while inputs.tag is the tag `gh release create` writes onto that commit.
+    # TAG below resolves the same two cases, and keeps the leading v the
+    # receiver requires (^v\d+\.\d+\.\d+$). The cli job's version output strips
+    # that v, so it is the wrong value to send.
+    name: dispatch the coop-website sync
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions: {}
     steps:
-      - name: Say how to sync the site
+      - name: Dispatch coop-release
         env:
-          VERSION: ${{ needs.cli.outputs.version }}
+          DISPATCH_TOKEN: ${{ secrets.COOP_WEBSITE_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
         run: |
-          echo "::warning::sync the site by hand in a coop-website clone:  bash scripts/sync-release.sh coop-sql-source-control $VERSION"
+          repo="${GITHUB_REPOSITORY#*/}"
+          if [ -z "${DISPATCH_TOKEN}" ]; then
+            echo "::notice title=coop-website sync skipped::No COOP_WEBSITE_DISPATCH_TOKEN secret. The release is published. Run the sync-release workflow in kabukisensei/coop-website by hand (repo: ${repo}, tag: ${TAG})."
+            exit 0
+          fi
+          if [ -z "${TAG}" ]; then echo "::error::No release tag to send."; exit 1; fi
+          payload="$(jq -n --arg repo "$repo" --arg tag "$TAG" '{event_type:"coop-release",client_payload:{repo:$repo,tag:$tag}}')"
+          curl --fail-with-body --silent --show-error --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "${payload}" \
+            "https://api.github.com/repos/kabukisensei/coop-website/dispatches"
