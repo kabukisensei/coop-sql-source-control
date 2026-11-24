@@ -41,6 +41,26 @@ jobs:
       - run: ruff check src tests && ruff format --check src tests
       - run: pytest -v
 
+  # Service containers run only on Linux, so this matrix is windows-latest alone.
+  # SQLSC_TEST_SERVER is left unset: the server fixture skips integration tests,
+  # and unit tests and lint still run.
+  test-windows:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]" ruff
+      - run: ruff check src tests && ruff format --check src tests
+      - run: pytest -v
+
   ssms-core:
     runs-on: ubuntu-24.04
     steps:
