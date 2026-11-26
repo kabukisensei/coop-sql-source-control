@@ -284,14 +284,17 @@ def sql_files(root: Path, *, depth: int = 3) -> list[str]:
     found: list[str] = []
 
     def walk(folder: Path, level: int) -> None:
-        for path in sorted(folder.iterdir()):
+        for path in folder.iterdir():
             if path.is_file() and path.suffix.lower() == ".sql":
                 found.append(path.relative_to(root).as_posix())
             elif path.is_dir() and level < depth and not path.name.startswith("."):
                 walk(path, level + 1)
 
     walk(root, 1)
-    return found
+    # The relative paths, compared as text. Sorting the Path objects instead follows
+    # the platform: Windows compares paths without case, so `bin` listed before `Data`
+    # and `dbo` before `Views`.
+    return sorted(found)
 
 
 def _schema_layout_key(rel: str) -> ObjectKey | None:
